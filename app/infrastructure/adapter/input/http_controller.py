@@ -9,6 +9,7 @@ from app.application.chat_debounce import ChatDebouncer
 from app.application.crm_use_case import CRMUseCase
 from app.application.calendar_use_case import CalendarUseCase
 from app.application.brasper_use_case import BrasperUseCase
+from app.application.features.chat_router_use_case import ChatRouterUseCase
 from app.infrastructure.redis_connection import redis_from_env
 from app.infrastructure.adapter.output.redis_cache_adapter import RedisCacheAdapter
 from app.infrastructure.adapter.output.llm.model_adapter import ModelAdapter
@@ -17,6 +18,10 @@ from app.infrastructure.adapter.output.whatsapp_adapter import WhatsappAdapter
 from app.application.lead_use_case import LeadUseCase
 from app.infrastructure.adapter.output.lead_scoring_adapter import LeadScoringAdapter
 from app.application.orchestador.conversation_orchestador import ConversationOrchestrator
+from app.application.policies.remittance_policies import RemittancePolicyEngine
+from app.application.response_builder import ResponseBuilder
+from app.application.services.conversation_state_service import ConversationStateService
+from app.application.services.lead_tracking_service import LeadTrackingService
 from app.infrastructure.adapter.output.llm.tool_router import ToolRouter
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "abcd")
 WHATSAPP_TOKEN = os.getenv('wp_key')
@@ -43,9 +48,29 @@ llm_adapter=ModelAdapter()
 lead_scoring_adapter=LeadScoringAdapter()
 lead_scoring_use=LeadUseCase(lead_scoring_adapter) # Corrected variable name
 
-orquestador=ConversationOrchestrator(llm_adapter,toolrouter,redis_cache_adapter)
+policy_engine = RemittancePolicyEngine(toolrouter)
+chat_router = ChatRouterUseCase(toolrouter, policy_engine)
+orquestador=ConversationOrchestrator(llm_adapter, policy_engine, chat_router)
+conversation_state_service = ConversationStateService(memory_adapter, redis_cache_adapter)
+lead_tracking_service = LeadTrackingService(
+    conversation_state_service,
+    lead_scoring_use,
+    crm_use_case,
+    llm_adapter,
+)
+response_builder = ResponseBuilder()
 
-chat_use_case=ChatUseCase(orquestador,llm_adapter,memory_adapter,lead_scoring_use, cache_adapter=redis_cache_adapter, crm_use_case=crm_use_case)
+chat_use_case=ChatUseCase(
+    orquestador,
+    llm_adapter,
+    memory_adapter,
+    lead_scoring_use,
+    cache_adapter=redis_cache_adapter,
+    crm_use_case=crm_use_case,
+    conversation_state_service=conversation_state_service,
+    lead_tracking_service=lead_tracking_service,
+    response_builder=response_builder,
+)
 chat_debouncer = ChatDebouncer(chat_use_case.execute)
 whatsapp_adapter = WhatsappAdapter()
 
