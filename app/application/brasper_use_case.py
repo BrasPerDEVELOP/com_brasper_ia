@@ -252,15 +252,6 @@ class BrasperUseCase:
             return 0.03
         return selected["percentage"] / 100
 
-    def _get_reverse_factor_for_amount(self, ranges, amount):
-        selected = self._range_for_amount(ranges, amount)
-        if not selected:
-            return 0.97
-        reverse_factor = float(selected.get("reverse") or 0)
-        if reverse_factor > 0:
-            return reverse_factor
-        return 1 - (selected["percentage"] / 100)
-
     def _coupon_discount_amount(self, coupon, base_commission):
         if not coupon or base_commission <= 0:
             return 0.0
@@ -274,15 +265,19 @@ class BrasperUseCase:
             return 0.0
         return min(max(coupon["discount_percentage"] / 100, 0), 1)
 
-    def _estimate_base_amount_send_from_receive(self, desired_receive, rate, ranges):
+    def _estimate_base_amount_send_from_receive(self, desired_receive, rate, ranges, coupon):
         normalized_desired_receive = self._round(desired_receive)
         estimate_send = max(self._round(normalized_desired_receive / rate), 0.01)
 
         for _ in range(8):
-            reverse_factor = self._get_reverse_factor_for_amount(ranges, estimate_send)
-            if not reverse_factor or reverse_factor <= 0:
+            commission_rate = self._get_commission_rate_for_amount(ranges, estimate_send)
+            base_commission = self._round(estimate_send * commission_rate)
+            coupon_discount_amount = self._coupon_discount_amount(coupon, base_commission)
+            actual_commission = self._round(max(base_commission - coupon_discount_amount, 0))
+            net_amount = self._round(estimate_send - actual_commission)
+            if net_amount <= 0:
                 break
-            next_estimate = self._round((normalized_desired_receive / reverse_factor) / rate)
+            next_estimate = self._round((normalized_desired_receive / rate) * (estimate_send / net_amount))
             if abs(next_estimate - estimate_send) < 0.01:
                 estimate_send = next_estimate
                 break
@@ -316,24 +311,26 @@ class BrasperUseCase:
         }
 
     def _calculate_inverse(self, desired_receive, rate, ranges, coupon):
-        base_amount_send = self._estimate_base_amount_send_from_receive(desired_receive, rate, ranges)
+        base_amount_send = self._estimate_base_amount_send_from_receive(desired_receive, rate, ranges, coupon)
         commission_rate = self._get_commission_rate_for_amount(ranges, base_amount_send)
         base_commission = self._round(base_amount_send * commission_rate)
-        total_to_send = self._round(base_amount_send - base_commission)
-        discount_fraction = self._coupon_discount_fraction(coupon, base_commission)
-        promotional_amount_send = self._round(base_amount_send - (base_commission * discount_fraction))
+        coupon_discount_amount = self._coupon_discount_amount(coupon, base_commission)
+        commission = self._round(max(base_commission - coupon_discount_amount, 0))
+        total_to_send = self._round(base_amount_send - commission)
         selected = self._range_for_amount(ranges, base_amount_send)
         return {
-            "amount_send": promotional_amount_send,
+            "amount_send": self._round(base_amount_send),
             "amount_send_without_promotion": self._round(base_amount_send),
-            "amount_receive": self._round(desired_receive),
+            "amount_receive": self._round(total_to_send * rate),
             "rate": float(rate),
-            "commission": base_commission,
+            "commission": commission,
             "commission_rate": self._round(commission_rate * 100),
             "total_to_send": total_to_send,
-            "coupon_discount": self._round(discount_fraction * 100),
+            "coupon_discount": self._round(
+                (coupon_discount_amount / base_commission) * 100
+            ) if base_commission > 0 else 0,
             "coupon_code": coupon["code"] if coupon else None,
-            "coupon_savings_amount": self._round(base_commission * discount_fraction),
+            "coupon_savings_amount": coupon_discount_amount,
             "commission_id": selected["id"] if selected else None,
         }
 

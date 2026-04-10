@@ -49,6 +49,8 @@ class RemittancePolicyEngine:
     )
     _EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
     _AMOUNT_RE = re.compile(r"(?<!\w)(\d+(?:[.,]\d{1,2})?)(?!\w)")
+    _RECEIVE_KEYWORDS = ("recibir", "receive", "receber")
+    _SEND_KEYWORDS = ("enviar", "send", "mandar", "transferir")
 
     def __init__(self, tool_router=None):
         self.tool_router = tool_router
@@ -233,16 +235,61 @@ class RemittancePolicyEngine:
             merged[key] = value
         return merged
 
+    def _extract_message_slot_overrides(self, message: str) -> dict:
+        lowered = self._normalize_text(message)
+        currencies = self._extract_currencies_from_message(message)
+        overrides = {}
+
+        extracted_amount = self._extract_amount(message)
+        if extracted_amount is not None:
+            if any(token in lowered for token in self._RECEIVE_KEYWORDS):
+                overrides["receive_amount"] = extracted_amount
+                overrides["send_amount"] = None
+                overrides["quote_mode"] = "receive"
+            elif any(token in lowered for token in self._SEND_KEYWORDS):
+                overrides["send_amount"] = extracted_amount
+                overrides["receive_amount"] = None
+                overrides["quote_mode"] = "send"
+
+        if len(currencies) >= 2:
+            first_currency, second_currency = currencies[0], currencies[1]
+            if any(token in lowered for token in self._RECEIVE_KEYWORDS):
+                overrides["origin_currency"] = second_currency
+                overrides["destination_currency"] = first_currency
+            else:
+                overrides["origin_currency"] = first_currency
+                overrides["destination_currency"] = second_currency
+        elif len(currencies) == 1:
+            if any(token in lowered for token in self._RECEIVE_KEYWORDS):
+                overrides["destination_currency"] = currencies[0]
+            elif any(token in lowered for token in self._SEND_KEYWORDS):
+                overrides["origin_currency"] = currencies[0]
+
+        email_match = self._EMAIL_RE.search(message or "")
+        if email_match:
+            overrides["email"] = email_match.group(0).lower()
+
+        name, last = self._name_parts(message)
+        if name:
+            overrides["name"] = name
+        if last:
+            overrides["last"] = last
+
+        if "whatsapp" in lowered:
+            overrides["wants_whatsapp"] = True
+        if any(keyword in lowered for keyword in self._HANDOFF_KEYWORDS):
+            overrides["wants_advisor"] = True
+
+        return overrides
+
     def _normalize_slots(self, slots: dict, message: str) -> dict:
         slots = dict(slots or {})
+        message_overrides = self._extract_message_slot_overrides(message)
+        slots.update({k: v for k, v in message_overrides.items() if v is not None})
+
         currencies = self._extract_currencies_from_message(message)
         origin_currency = self._normalize_currency(slots.get("origin_currency"))
         destination_currency = self._normalize_currency(slots.get("destination_currency"))
-
-        if not origin_currency and currencies:
-            origin_currency = currencies[0]
-        if not destination_currency and len(currencies) > 1:
-            destination_currency = currencies[1]
 
         amount = self._parse_amount(slots.get("send_amount"))
         receive_amount = self._parse_amount(slots.get("receive_amount"))
@@ -256,16 +303,6 @@ class RemittancePolicyEngine:
             else:
                 amount = extracted_amount
                 slots["quote_mode"] = slots.get("quote_mode") or "send"
-
-        email_match = self._EMAIL_RE.search(message or "")
-        if not slots.get("email") and email_match:
-            slots["email"] = email_match.group(0).lower()
-
-        name, last = self._name_parts(message)
-        if not slots.get("name") and name:
-            slots["name"] = name
-        if not slots.get("last") and last:
-            slots["last"] = last
 
         wants_whatsapp = self._coerce_boolean(slots.get("wants_whatsapp"))
         wants_advisor = self._coerce_boolean(slots.get("wants_advisor"))

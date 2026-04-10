@@ -1,6 +1,13 @@
 import unittest
+import sys
+import types
 
 from app.application.chat_models import ConversationContext
+httpx_stub = types.ModuleType("httpx")
+httpx_stub.Client = object
+sys.modules.setdefault("httpx", httpx_stub)
+
+from app.application.brasper_use_case import BrasperUseCase
 from app.application.features.chat_router_use_case import ChatRouterUseCase
 from app.application.orchestador.conversation_orchestador import ConversationOrchestrator
 from app.application.policies.remittance_policies import RemittancePolicyEngine
@@ -143,6 +150,95 @@ class ChatArchitectureTests(unittest.TestCase):
         result, decision = orchestrator.run(context)
         self.assertEqual(decision["intent"], "remittance_quote")
         self.assertIn("https://wa.me/test", result.message)
+
+    def test_new_amount_overrides_previous_context_amount(self):
+        normalized = self.policy_engine.post_process(
+            "quiero recibir 1000 reales a soles",
+            {
+                "origin_currency": "PEN",
+                "destination_currency": "BRL",
+                "send_amount": 100.0,
+                "quote_mode": "send",
+                "language": "es",
+            },
+            None,
+            self.policy_engine.pre_process(
+                "quiero recibir 1000 reales a soles",
+                {
+                    "origin_currency": "PEN",
+                    "destination_currency": "BRL",
+                    "send_amount": 100.0,
+                    "quote_mode": "send",
+                    "language": "es",
+                },
+            ),
+        )
+        self.assertEqual(normalized["extracted_data"]["receive_amount"], 1000.0)
+        self.assertEqual(normalized["extracted_data"]["quote_mode"], "receive")
+
+    def test_receive_phrase_flips_currency_direction(self):
+        normalized = self.policy_engine.post_process(
+            "quiero recibir 1000 reales a soles",
+            {},
+            None,
+            self.policy_engine.pre_process("quiero recibir 1000 reales a soles", {}),
+        )
+        self.assertEqual(normalized["intent"], "remittance_quote")
+        self.assertEqual(normalized["extracted_data"]["origin_currency"], "PEN")
+        self.assertEqual(normalized["extracted_data"]["destination_currency"], "BRL")
+        self.assertEqual(normalized["extracted_data"]["receive_amount"], 1000.0)
+
+    def test_inverse_quote_matches_direct_formula(self):
+        class TestBrasperUseCase(BrasperUseCase):
+            def get_exchange_rates(self, args=None):
+                return {"rates": [{"id": 1, "origin_currency": "PEN", "destination_currency": "BRL", "rate": 0.75}]}
+
+            def get_commission_ranges(self, args=None):
+                return {
+                    "commission_ranges": [
+                        {
+                            "id": 10,
+                            "origin_currency": "PEN",
+                            "destination_currency": "BRL",
+                            "percentage": 3.0,
+                            "reverse": 0,
+                            "min_amount": 0,
+                            "max_amount": 100000,
+                            "updated_at": None,
+                        }
+                    ]
+                }
+
+            def get_active_coupons(self, args=None):
+                return {
+                    "coupons": [
+                        {
+                            "id": 99,
+                            "code": "PROMO10",
+                            "discount_percentage": 10.0,
+                            "origin_currency": "PEN",
+                            "destination_currency": "BRL",
+                            "start_date": "2026-01-01",
+                            "end_date": "2026-12-31",
+                        }
+                    ]
+                }
+
+        use_case = TestBrasperUseCase()
+        quote = use_case.quote_exchange_operation(
+            {
+                "origin_currency": "PEN",
+                "destination_currency": "BRL",
+                "receive_amount": 100,
+                "mode": "receive",
+                "language": "es",
+            }
+        )
+        expected_receive = round(quote["total_to_send"] * quote["rate"], 2)
+        self.assertEqual(quote["amount_receive"], expected_receive)
+        self.assertAlmostEqual(quote["commission"], 3.7, places=2)
+        self.assertAlmostEqual(quote["coupon_savings_amount"], 0.41, places=2)
+        self.assertAlmostEqual(quote["amount_send"], 137.03, places=2)
 
 
 if __name__ == "__main__":
