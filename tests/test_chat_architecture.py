@@ -188,6 +188,32 @@ class ChatArchitectureTests(unittest.TestCase):
         self.assertEqual(normalized["extracted_data"]["destination_currency"], "BRL")
         self.assertEqual(normalized["extracted_data"]["receive_amount"], 1000.0)
 
+    def test_bare_amount_updates_existing_send_quote(self):
+        normalized = self.policy_engine.post_process(
+            "250",
+            {
+                "origin_currency": "PEN",
+                "destination_currency": "BRL",
+                "send_amount": 100.0,
+                "quote_mode": "send",
+                "language": "es",
+            },
+            None,
+            self.policy_engine.pre_process(
+                "250",
+                {
+                    "origin_currency": "PEN",
+                    "destination_currency": "BRL",
+                    "send_amount": 100.0,
+                    "quote_mode": "send",
+                    "language": "es",
+                },
+            ),
+        )
+        self.assertEqual(normalized["extracted_data"]["send_amount"], 250.0)
+        self.assertIsNone(normalized["extracted_data"]["receive_amount"])
+        self.assertEqual(normalized["extracted_data"]["quote_mode"], "send")
+
     def test_inverse_quote_matches_direct_formula(self):
         class TestBrasperUseCase(BrasperUseCase):
             def get_exchange_rates(self, args=None):

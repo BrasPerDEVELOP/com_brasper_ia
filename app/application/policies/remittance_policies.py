@@ -303,6 +303,15 @@ class RemittancePolicyEngine:
             else:
                 amount = extracted_amount
                 slots["quote_mode"] = slots.get("quote_mode") or "send"
+        elif extracted_amount is not None:
+            current_mode = str(slots.get("quote_mode") or "").lower()
+            if current_mode == "receive":
+                receive_amount = extracted_amount
+                amount = None
+            elif current_mode == "send" or not current_mode:
+                amount = extracted_amount
+                receive_amount = None
+                slots["quote_mode"] = current_mode or "send"
 
         wants_whatsapp = self._coerce_boolean(slots.get("wants_whatsapp"))
         wants_advisor = self._coerce_boolean(slots.get("wants_advisor"))
