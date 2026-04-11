@@ -1,0 +1,27 @@
+.env
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+node_modules/
+
+venv/
+credentials.json
+token.json
+
+# Archivos generados por Flutter y Ninja
+.flutter-plugins
+.flutter-plugins-dependencies
+.dart_tool/
+.idea/
+.vscode/
+build/
+*.iml
+*.packages
+debug_bundle_linux-x64_assets.stamp
+flutter_assets.d
+.ninja_log
+
+dist/
