@@ -1,6 +1,40 @@
 from app.application.chat_models import DomainEvent, FeatureResult
 
 
+def _display_field(value, default="No indicado"):
+    if value is None:
+        return default
+    if isinstance(value, str) and not value.strip():
+        return default
+    if value is False:
+        return default
+    return str(value).strip()
+
+
+def build_advisor_summary_data(user_id: str, extracted_data: dict) -> dict:
+    """
+    Campos listos para `generate_summary`: sin None en valores (evita 'None' en textos)
+    y sin exponer el teléfono en el mensaje al asesor (no se incluye en esta estructura).
+    """
+    name = _display_field(extracted_data.get("name"), "")
+    last = _display_field(extracted_data.get("last"), "")
+    full_name = " ".join(part for part in (name, last) if part).strip() or "Sin nombre registrado"
+    return {
+        "language": _display_field(extracted_data.get("language"), "es"),
+        "origin_currency": _display_field(extracted_data.get("origin_currency")),
+        "destination_currency": _display_field(extracted_data.get("destination_currency")),
+        "send_amount": _display_field(extracted_data.get("send_amount")),
+        "receive_amount": _display_field(extracted_data.get("receive_amount")),
+        "quote_mode": _display_field(extracted_data.get("quote_mode")),
+        "coupon_code": _display_field(extracted_data.get("coupon_code")),
+        "urgency": _display_field(extracted_data.get("urgency")),
+        "name": full_name,
+        "documentNumber": _display_field(extracted_data.get("documentNumber")),
+        # Solo referencia interna / CRM; no se imprime en el texto del enlace al asesor
+        "phone": user_id,
+    }
+
+
 class LeadTrackingService:
     def __init__(self, state_service, lead_scoring_case, crm_use_case, llm_port):
         self.state_service = state_service
@@ -29,20 +63,7 @@ class LeadTrackingService:
         return new_data
 
     def _summary_payload(self, user_id: str, extracted_data: dict) -> dict:
-        return {
-            "language": extracted_data.get("language", "es"),
-            "origin_currency": extracted_data.get("origin_currency", "No mencionado"),
-            "destination_currency": extracted_data.get("destination_currency", "No mencionado"),
-            "send_amount": extracted_data.get("send_amount", "No mencionado"),
-            "receive_amount": extracted_data.get("receive_amount", "No mencionado"),
-            "quote_mode": extracted_data.get("quote_mode", "No mencionado"),
-            "coupon_code": extracted_data.get("coupon_code", "No mencionado"),
-            "urgency": extracted_data.get("urgency", "No mencionado"),
-            "name": extracted_data.get("name", "-"),
-            "phone": user_id,
-            "last": extracted_data.get("last"),
-            "documentNumber": extracted_data.get("documentNumber", "-"),
-        }
+        return build_advisor_summary_data(user_id, extracted_data)
 
     def _should_update_summary(self, extracted_data: dict, result: FeatureResult) -> bool:
         if result.type in {"quote_result", "coupon_result", "handoff_result", "contact_prompt"}:

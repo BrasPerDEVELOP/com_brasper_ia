@@ -82,15 +82,40 @@ class FakeLLM:
             "extracted_data": {"name": "Juan", "last": "Perez", "email": "juan@test.com", "language": "es"},
         }
 
+    def generate_summary(self, data):
+        return {"summary": f"Resumen test {data.get('name', '')}"}
+
 
 class ChatArchitectureTests(unittest.TestCase):
     def setUp(self):
         self.tool_router = FakeToolRouter()
         self.policy_engine = RemittancePolicyEngine(self.tool_router)
-        self.chat_router = ChatRouterUseCase(self.tool_router, self.policy_engine)
+        self.chat_router = ChatRouterUseCase(self.tool_router, self.policy_engine, FakeLLM(None))
 
     def _context(self, message):
         return ConversationContext(user_id="51999999999", message=message, history=[], lead_state={})
+
+    def test_how_it_works_with_sticky_quote_context_routes_to_info_not_repeat_quote(self):
+        """Preguntas tipo '¿cómo funciona?' no deben repetir la última cotización por slots heredados."""
+        orchestrator = ConversationOrchestrator(FakeLLM(None), self.policy_engine, self.chat_router)
+        sticky_lead = {
+            "origin_currency": "BRL",
+            "destination_currency": "PEN",
+            "send_amount": 6333.07,
+            "quote_mode": "send",
+            "language": "es",
+        }
+        ctx = ConversationContext(
+            user_id="51999999999",
+            message="como funciona brasper",
+            history=[],
+            lead_state=sticky_lead,
+        )
+        result, decision = orchestrator.run(ctx)
+        self.assertEqual(decision["intent"], "remittance_requirements")
+        self.assertEqual(decision.get("metadata", {}).get("reason"), "brasper_info")
+        self.assertEqual(result.type, "requirements_result")
+        self.assertIn("Brasper es un servicio", result.message)
 
     def test_direct_quote_without_llm(self):
         orchestrator = ConversationOrchestrator(FakeLLM(None), self.policy_engine, self.chat_router)
@@ -120,6 +145,7 @@ class ChatArchitectureTests(unittest.TestCase):
     def test_handoff_skips_quote(self):
         orchestrator = ConversationOrchestrator(FakeLLM(None), self.policy_engine, self.chat_router)
         context = self._context("Quiero hablar con un asesor por whatsapp")
+        context.lead_state = {"name": "María", "last": "López", "language": "es"}
         context.summary = {"summary": "Resumen previo"}
         result, decision = orchestrator.run(context)
         self.assertEqual(decision["intent"], "human_handoff")

@@ -49,7 +49,7 @@ lead_scoring_adapter=LeadScoringAdapter()
 lead_scoring_use=LeadUseCase(lead_scoring_adapter) # Corrected variable name
 
 policy_engine = RemittancePolicyEngine(toolrouter)
-chat_router = ChatRouterUseCase(toolrouter, policy_engine)
+chat_router = ChatRouterUseCase(toolrouter, policy_engine, llm_adapter)
 orquestador=ConversationOrchestrator(llm_adapter, policy_engine, chat_router)
 conversation_state_service = ConversationStateService(memory_adapter, redis_cache_adapter)
 lead_tracking_service = LeadTrackingService(

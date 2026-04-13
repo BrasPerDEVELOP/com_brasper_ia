@@ -1,7 +1,12 @@
+import os
 import re
 
 
 class RemittancePolicyEngine:
+    # Respuestas 100 % deterministas por reglas: aquí no hace falta el LLM (ahorra latencia y coste).
+    # Para cotización, saludo, asesor, contacto, etc. sí se llama al modelo para interpretar el mensaje
+    # y fusionar slots con lo que ya había en sesión.
+    _SKIP_LLM_REASONS = frozenset({"coupon_lookup", "supported_pairs", "brasper_info"})
     _CURRENCY_ALIASES = {
         "USD": {"usd", "dolar", "dolares", "dólar", "dólares", "dollar", "dollars", "usdt"},
         "PEN": {"pen", "sol", "soles", "nuevo sol", "nuevos soles"},
@@ -32,6 +37,38 @@ class RemittancePolicyEngine:
         "attendant",
     )
     _SUPPORTED_QUERY_KEYWORDS = ("currency", "currencies", "moneda", "monedas", "moeda", "moedas", "pair", "par")
+    # Preguntas sobre el servicio (no son pedidos de cotización aunque haya contexto previo con montos).
+    _BRASPER_INFO_PHRASES = (
+        "como funciona",
+        "cómo funciona",
+        "como se usa",
+        "cómo se usa",
+        "como utilizo",
+        "cómo utilizo",
+        "como usar",
+        "cómo usar",
+        "que es brasper",
+        "qué es brasper",
+        "para que sirve",
+        "para qué sirve",
+        "informacion sobre brasper",
+        "información sobre brasper",
+        "informacion de brasper",
+        "información de brasper",
+        "informacion brasper",
+        "información brasper",
+        "cuentame sobre brasper",
+        "cuéntame sobre brasper",
+        "como funciona brasper",
+        "cómo funciona brasper",
+        "how does",
+        "how it works",
+        "what is brasper",
+        "como funciona a brasper",
+        "cómo funciona a brasper",
+        "como funciona o brasper",
+        "cómo funciona o brasper",
+    )
     _REMITTANCE_HINTS = (
         "cotiza",
         "cotizar",
@@ -89,12 +126,26 @@ class RemittancePolicyEngine:
                 "requirements": "Brasper cotiza corredores BRL a PEN, PEN a BRL, BRL a USD y USD a BRL.",
                 "contact_ok": "Listo, registré tu contacto para continuar con tu consulta.",
                 "need_name": "Para registrarte, compárteme tu nombre y apellido.",
+                "need_name_before_advisor": (
+                    "Para derivarte con un asesor por WhatsApp necesito tu **nombre y apellido** "
+                    "(por ejemplo: Ana García). Respóndeme en un solo mensaje y luego vuelve a pedir asesor si hace falta."
+                ),
+                "handoff_prereq_ok": (
+                    "Perfecto, ya tengo tu nombre. Te dejo el enlace para continuar con un asesor Brasper por WhatsApp."
+                ),
                 "need_email": "Compárteme tu correo para dejar registrada tu consulta.",
                 "quote_suffix": "Si deseas, también te preparo el mensaje listo para WhatsApp.",
                 "coupons_none": "Hoy no hay cupones activos disponibles para ese corredor.",
                 "supported_intro": "Monedas y corredores disponibles:",
                 "invalid_pair": "Brasper solo opera BRL a PEN, PEN a BRL, BRL a USD y USD a BRL.",
                 "invalid_amount": "Necesito un monto válido mayor a 0 para ayudarte con la cotización.",
+                "brasper_info": (
+                    "Brasper es un servicio de envío de dinero entre monedas (corredores BRL↔PEN y BRL↔USD). "
+                    "En el chat puedes pedir una cotización indicando moneda de origen, de destino y cuánto quieres "
+                    "enviar o recibir; el asistente usa las tasas y comisiones vigentes de la plataforma. "
+                    "También puedes preguntar por cupones activos o pedir que te derivemos por WhatsApp con un asesor. "
+                    "¿Quieres cotizar ahora o necesitas algo más concreto?"
+                ),
             },
             "pt": {
                 "greeting": "Olá, sou o assistente da Brasper. Posso ajudar com cotações, comissões, cupons ativos e atendimento por WhatsApp.",
@@ -105,12 +156,26 @@ class RemittancePolicyEngine:
                 "requirements": "A Brasper cota corredores BRL para PEN, PEN para BRL, BRL para USD e USD para BRL.",
                 "contact_ok": "Pronto, registrei seu contato para continuar com a consulta.",
                 "need_name": "Para registrar, compartilhe seu nome e sobrenome.",
+                "need_name_before_advisor": (
+                    "Para te encaminhar a um assessor pelo WhatsApp, preciso do seu **nome e sobrenome** "
+                    "(por exemplo: Ana Silva). Envie em uma única mensagem e depois peça novamente o assessor se precisar."
+                ),
+                "handoff_prereq_ok": (
+                    "Perfeito, já tenho seu nome. Segue o link para continuar com um assessor Brasper pelo WhatsApp."
+                ),
                 "need_email": "Compartilhe seu e-mail para registrar sua consulta.",
                 "quote_suffix": "Se quiser, também posso preparar a mensagem pronta para WhatsApp.",
                 "coupons_none": "Hoje não há cupons ativos disponíveis para esse corredor.",
                 "supported_intro": "Moedas e corredores disponíveis:",
                 "invalid_pair": "A Brasper opera apenas BRL para PEN, PEN para BRL, BRL para USD e USD para BRL.",
                 "invalid_amount": "Preciso de um valor válido maior que 0 para ajudar com a cotação.",
+                "brasper_info": (
+                    "A Brasper é um serviço de envio entre moedas (corredores BRL↔PEN e BRL↔USD). "
+                    "Neste chat você pode pedir uma cotação dizendo a moeda de origem, a de destino e quanto quer "
+                    "enviar ou receber; o assistente usa taxas e comissões vigentes na plataforma. "
+                    "Também dá para perguntar sobre cupons ativos ou pedir encaminhamento por WhatsApp com um assessor. "
+                    "Quer cotar agora ou precisa de mais alguma coisa?"
+                ),
             },
             "en": {
                 "greeting": "Hello, I am the Brasper assistant. I can help with quotes, commissions, active coupons, and WhatsApp handoff.",
@@ -121,12 +186,26 @@ class RemittancePolicyEngine:
                 "requirements": "Brasper quotes BRL to PEN, PEN to BRL, BRL to USD, and USD to BRL corridors.",
                 "contact_ok": "Done, I registered your contact so we can continue your request.",
                 "need_name": "To register you, please share your first and last name.",
+                "need_name_before_advisor": (
+                    "To connect you with an advisor on WhatsApp I need your **first and last name** "
+                    "(for example: Ana Garcia). Send it in one message, then ask for an advisor again if needed."
+                ),
+                "handoff_prereq_ok": (
+                    "Great, I have your name. Here is the link to continue with a Brasper advisor on WhatsApp."
+                ),
                 "need_email": "Please share your email so I can register your request.",
                 "quote_suffix": "If you want, I can also prepare the ready-to-send WhatsApp message.",
                 "coupons_none": "There are no active coupons available for that corridor today.",
                 "supported_intro": "Available currencies and corridors:",
                 "invalid_pair": "Brasper currently supports only BRL to PEN, PEN to BRL, BRL to USD, and USD to BRL.",
                 "invalid_amount": "I need a valid amount greater than 0 to help with the quote.",
+                "brasper_info": (
+                    "Brasper is a money-transfer service between currencies (BRL↔PEN and BRL↔USD corridors). "
+                    "In this chat you can request a quote by stating origin currency, destination currency, and how "
+                    "much you want to send or receive; the assistant uses live rates and fees from the platform. "
+                    "You can also ask about active coupons or request a handoff to an advisor on WhatsApp. "
+                    "Would you like a quote now, or something more specific?"
+                ),
             },
         }
         return dictionary.get(language, dictionary["es"]).get(key, dictionary["es"]["fallback"])
@@ -206,6 +285,21 @@ class RemittancePolicyEngine:
             return False
         return None
 
+    _NAME_STOPWORDS = frozenset(
+        {
+            "deriveme",
+            "derivame",
+            "derívame",
+            "derivar",
+            "asesor",
+            "whatsapp",
+            "quiero",
+            "necesito",
+            "por",
+            "favor",
+        }
+    )
+
     def _name_parts(self, message: str):
         if self._EMAIL_RE.search(message or ""):
             return None, None
@@ -215,6 +309,8 @@ class RemittancePolicyEngine:
             return None, None
         lower_tokens = [token.lower() for token in tokens]
         if any(token in self._REMITTANCE_HINTS for token in lower_tokens):
+            return None, None
+        if any(token in self._NAME_STOPWORDS for token in lower_tokens):
             return None, None
         return tokens[0].title(), tokens[1].title()
 
@@ -346,6 +442,9 @@ class RemittancePolicyEngine:
         }
         return normalized
 
+    def _is_brasper_informational_query(self, lowered: str) -> bool:
+        return any(phrase in lowered for phrase in self._BRASPER_INFO_PHRASES)
+
     def _detect_intent(self, message: str, normalized_slots: dict) -> tuple[str | None, str | None]:
         lowered = self._normalize_text(message)
         has_quote_signal = (
@@ -363,6 +462,8 @@ class RemittancePolicyEngine:
             return "greeting", "greeting"
         if any(keyword in lowered for keyword in self._SUPPORTED_QUERY_KEYWORDS):
             return "remittance_requirements", "supported_pairs"
+        if self._is_brasper_informational_query(lowered):
+            return "remittance_requirements", "brasper_info"
         if has_quote_signal:
             return "remittance_quote", "quote_detected"
         if normalized_slots.get("email") or (normalized_slots.get("name") and normalized_slots.get("last")):
@@ -388,8 +489,10 @@ class RemittancePolicyEngine:
         normalized_slots = self._normalize_slots(lead_state, message)
         intent, reason = self._detect_intent(message, normalized_slots)
         validation_error = self._validation_error(normalized_slots)
-        direct_intents = {"greeting", "human_handoff", "remittance_requirements", "remittance_quote"}
-        should_skip_llm = intent in direct_intents and reason != "contact_data"
+        # CHAT_FORCE_LLM=1 desactiva cualquier salto del LLM (solo cupones/listas/info fija seguirán
+        # resolviéndose por reglas en post_process si el intent encaja).
+        force_llm = (os.getenv("CHAT_FORCE_LLM") or "").strip().lower() in ("1", "true", "yes", "on")
+        should_skip_llm = (reason in self._SKIP_LLM_REASONS) and not force_llm
         return {
             "intent": intent,
             "reason": reason,

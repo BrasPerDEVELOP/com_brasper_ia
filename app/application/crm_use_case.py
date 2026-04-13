@@ -160,6 +160,9 @@ class CRMUseCase():
                 else                                        : lead_data["documentType"] = "UNKNOWN"
             # Filtrar valores vacíos de los nuevos datos para no sobreescribir data existente.
             clean_lead_data = {k: v for k, v in lead_data.items() if v}
+            if lead_data.get("pending_handoff_prereq") is False:
+                existing_data.pop("pending_handoff_prereq", None)
+                clean_lead_data.pop("pending_handoff_prereq", None)
             existing_data.update(clean_lead_data)
 
             # 1. Guardar/actualizar los datos del lead sin TTL (persistente en Redis hasta el job)

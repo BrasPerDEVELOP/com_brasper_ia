@@ -140,17 +140,26 @@ class ModelAdapter(LLMPort):
                 "extracted_data": {"phone": userId}
         }
         
-    def generate_summary(self,data:dict):
+    def generate_summary(self, data: dict):
         try:
-            
-            message= (
-                f"Cliente {data.get('name')} con DNI {data.get('documentNumber')} "
-                f"Telefono {data.get('phone')}. Consulta remesa en idioma {data.get('language')} "
-                f"desde {data.get('origin_currency')} hacia {data.get('destination_currency')}. "
-                f"Monto a enviar {data.get('send_amount')} y monto a recibir {data.get('receive_amount')}. "
-                f"Modo {data.get('quote_mode')} cupón {data.get('coupon_code')} y urgencia {data.get('urgency')}."                
+            def d(key: str, default: str = "No indicado") -> str:
+                v = data.get(key)
+                if v is None:
+                    return default
+                if isinstance(v, str) and not str(v).strip():
+                    return default
+                return str(v).strip()
+
+            name = d("name", "Sin nombre registrado")
+            doc = d("documentNumber", "no indicado")
+            # No incluir teléfono en el texto del enlace al asesor (privacidad / canal ya identifica al usuario).
+            message = (
+                f"Cliente: {name}. DNI/Doc: {doc}. Idioma: {d('language', 'es')}. "
+                f"Corredor: {d('origin_currency')} → {d('destination_currency')}. "
+                f"Monto a enviar: {d('send_amount')}; monto a recibir: {d('receive_amount')}. "
+                f"Modo: {d('quote_mode')}; cupón: {d('coupon_code')}; urgencia: {d('urgency')}."
             )
-            #f"Cliente {bullets_list[4]}  con DNI {bullets_list[6]} y telefono {bullets_list[6]}. busca en zonas {bullets_list[0]} su presupuesto es de {bullets_list[1]} agendo cita: {bullets_list[2]} es urgente {bullets_list[3]}"
-            return {"summary":message}
+            return {"summary": message}
         except Exception as e:
             print("Hubo un error", e)
+            return {"summary": ""}

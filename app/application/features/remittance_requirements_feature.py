@@ -10,7 +10,9 @@ class RemittanceRequirementsFeature:
         language = decision.get("language") or "es"
         metadata = decision.get("metadata", {})
         message = self.policy_engine.copy(language, "requirements")
-        if metadata.get("reason") == "supported_pairs":
+        if metadata.get("reason") == "brasper_info":
+            message = self.policy_engine.copy(language, "brasper_info")
+        elif metadata.get("reason") == "supported_pairs":
             supported = self.tool_router.router({"name": "get_supported_currencies", "args": {}})
             currencies = ", ".join(item["code"] for item in supported.get("currencies", []))
             pairs = ", ".join(

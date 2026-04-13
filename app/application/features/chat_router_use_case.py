@@ -7,22 +7,48 @@ from app.application.features.remittance_requirements_feature import RemittanceR
 
 
 class ChatRouterUseCase:
-    def __init__(self, tool_router, policy_engine):
+    def __init__(self, tool_router, policy_engine, llm_port):
         self.policy_engine = policy_engine
         self.greeting_feature = GreetingFeature(policy_engine)
         self.requirements_feature = RemittanceRequirementsFeature(tool_router, policy_engine)
         self.coupons_feature = CouponsFeature(tool_router, policy_engine)
         self.contact_feature = ContactFeature(policy_engine)
-        self.handoff_feature = HandoffFeature(tool_router)
+        self.handoff_feature = HandoffFeature(tool_router, llm_port)
         self.quote_feature = RemittanceQuoteFeature(tool_router, policy_engine)
 
     def route(self, context, decision: dict):
+        ls = context.lead_state or {}
+        dec_data = decision.get("extracted_data") or {}
+        merged_profile = {**ls, **dec_data}
+        if ls.get("pending_handoff_prereq") and str(merged_profile.get("name") or "").strip() and str(
+            merged_profile.get("last") or ""
+        ).strip():
+            decision = {
+                **decision,
+                "intent": "human_handoff",
+                "extracted_data": merged_profile,
+            }
+
         metadata = decision.get("metadata", {})
         if decision.get("intent") == "greeting":
             return self.greeting_feature.execute(context, decision)
         if metadata.get("reason") == "coupon_lookup":
             return self.coupons_feature.execute(context, decision)
         if decision.get("intent") == "human_handoff":
+            data = decision.get("extracted_data") or {}
+            merged = {**(context.lead_state or {}), **data}
+            if not (
+                str(merged.get("name") or "").strip() and str(merged.get("last") or "").strip()
+            ):
+                handoff_decision = {
+                    **decision,
+                    "intent": "collect_contact",
+                    "metadata": {
+                        **(decision.get("metadata") or {}),
+                        "reason": "handoff_prereq",
+                    },
+                }
+                return self.contact_feature.execute(context, handoff_decision)
             return self.handoff_feature.execute(context, decision)
         if decision.get("intent") == "collect_contact":
             return self.contact_feature.execute(context, decision)
