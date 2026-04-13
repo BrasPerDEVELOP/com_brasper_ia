@@ -23,6 +23,9 @@ from app.application.response_builder import ResponseBuilder
 from app.application.services.conversation_state_service import ConversationStateService
 from app.application.services.lead_tracking_service import LeadTrackingService
 from app.infrastructure.adapter.output.llm.tool_router import ToolRouter
+from app.infrastructure.adapter.output.webchat_persistence_adapter import WebchatPersistenceAdapter
+from app.infrastructure.adapter.output.client_directory_adapter import ClientDirectoryAdapter
+from app.application.webchat_flow_use_case import WebchatFlowUseCase
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "abcd")
 WHATSAPP_TOKEN = os.getenv('wp_key')
 
@@ -41,7 +44,7 @@ crm_use_case=CRMUseCase(crm_adapter, cache_adapter=redis_cache_adapter)
 brasper_use_case = BrasperUseCase()
 
 toolrouter=ToolRouter(calendar_use_case, crm_use_case, brasper_use_case)
-memory_adapter=MemoryAdapter()
+memory_adapter=MemoryAdapter(redis_cache_adapter)
 
 llm_adapter=ModelAdapter()
 
@@ -59,6 +62,8 @@ lead_tracking_service = LeadTrackingService(
     llm_adapter,
 )
 response_builder = ResponseBuilder()
+webchat_persistence = WebchatPersistenceAdapter()
+client_directory = ClientDirectoryAdapter(webchat_persistence)
 
 chat_use_case=ChatUseCase(
     orquestador,
@@ -73,8 +78,23 @@ chat_use_case=ChatUseCase(
 )
 chat_debouncer = ChatDebouncer(chat_use_case.execute)
 whatsapp_adapter = WhatsappAdapter()
+webchat_flow = WebchatFlowUseCase(
+    redis_cache_adapter,
+    webchat_persistence,
+    client_directory,
+    chat_use_case,
+)
 
 class Message(BaseModel):
+    message: str
+
+
+class WebchatStartPayload(BaseModel):
+    session_id: str | None = None
+
+
+class WebchatMessagePayload(BaseModel):
+    session_id: str
     message: str
 
 #adaptadores de entraa
@@ -89,6 +109,21 @@ async def consultar(user_id: str, message_user: str):
 async def consultarWebChat(message_user: Message):
     response = await chat_debouncer.add_and_wait("51990966022", message_user.message)  # type: ignore[arg-type]
     return {"response": response}
+
+
+@router.post("/webchat/session/start")
+async def start_webchat_session(payload: WebchatStartPayload):
+    return webchat_flow.start_session(payload.session_id)
+
+
+@router.post("/webchat/session/message")
+async def send_webchat_message(payload: WebchatMessagePayload):
+    return webchat_flow.handle_message(payload.session_id, payload.message)
+
+
+@router.post("/webchat/session/identify")
+async def identify_webchat_user(payload: WebchatMessagePayload):
+    return webchat_flow.handle_message(payload.session_id, payload.message)
 
 #guardar lead (pruebas)
 @router.post("/save-lead")

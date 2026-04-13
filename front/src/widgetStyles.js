@@ -314,6 +314,39 @@ export const styles = `
   background: #fff;
 }
 
+.eg-chat-form--hidden {
+  display: none;
+}
+
+.eg-chat-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 0 14px 14px;
+  background: #fff;
+}
+
+.eg-chat-options--hidden {
+  display: none;
+}
+
+.eg-chat-option-button {
+  border: 1px solid color-mix(in srgb, var(--eg-primary, #0b8a68) 45%, white);
+  background: white;
+  color: var(--eg-primary, #0b8a68);
+  border-radius: 14px;
+  padding: 10px 14px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 8px 18px rgba(11, 30, 25, 0.08);
+}
+
+.eg-chat-option-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .eg-chat-input {
   flex: 1;
   border: 0;

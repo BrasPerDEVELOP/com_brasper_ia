@@ -403,6 +403,24 @@ class RemittancePolicyEngine:
         llm_slots = self._normalize_slots(llm_extract.get("extracted_data", {}), message)
         merged_slots = self._merge_slots(lead_state, pre_analysis.get("normalized_slots", {}))
         merged_slots = self._merge_slots(merged_slots, llm_slots)
+        for key in [
+            "language",
+            "name",
+            "last",
+            "phone",
+            "documentNumber",
+            "email",
+            "origin_currency",
+            "destination_currency",
+            "send_amount",
+            "receive_amount",
+            "quote_mode",
+            "coupon_code",
+            "wants_whatsapp",
+            "wants_advisor",
+            "urgency",
+        ]:
+            merged_slots.setdefault(key, None)
 
         intent, reason = self._detect_intent(message, merged_slots)
         final_intent = intent or llm_extract.get("intent") or pre_analysis.get("intent") or "remittance_requirements"

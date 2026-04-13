@@ -6,16 +6,21 @@ import {
   sanitizeDimension,
   toCssColor,
 } from './widgetDom.js';
-import { sendChatMessage } from './widgetClient.js';
+import { sendSessionMessage, startSession } from './widgetClient.js';
 import { styles } from './widgetStyles.js';
 
 export function createWidget(userConfig = {}) {
   const config = mergeConfig(userConfig);
+  const sessionStorageKey = `embedding-gemma-chat-session:${config.containerId}`;
   const state = {
     isOpen: false,
     isLoading: false,
     messages: [],
     error: null,
+    sessionId: null,
+    initialized: false,
+    inputMode: 'text',
+    options: [],
   };
 
   let host = null;
@@ -27,6 +32,7 @@ export function createWidget(userConfig = {}) {
   let formNode = null;
   let inputNode = null;
   let statusNode = null;
+  let optionsNode = null;
 
   function setState(nextState) {
     Object.assign(state, nextState);
@@ -175,8 +181,9 @@ export function createWidget(userConfig = {}) {
     submitButton.innerHTML = createIconMarkup('send');
     formNode.addEventListener('submit', handleSubmit);
     formNode.append(inputNode, submitButton);
+    optionsNode = createElement('div', { className: 'eg-chat-options eg-chat-options--hidden' });
 
-    panel.append(header, messagesNode, statusNode, formNode);
+    panel.append(header, messagesNode, statusNode, optionsNode, formNode);
     shell.append(launcherButton, panel);
     shadowRoot.appendChild(shell);
 
@@ -244,8 +251,11 @@ export function createWidget(userConfig = {}) {
     formNode.querySelector('.eg-chat-submit').disabled = state.isLoading;
     statusNode.textContent = state.error || '';
     statusNode.classList.toggle('eg-chat-status--visible', Boolean(state.error));
+    formNode.classList.toggle('eg-chat-form--hidden', state.inputMode !== 'text');
+    optionsNode.classList.toggle('eg-chat-options--hidden', state.inputMode !== 'options');
 
     renderMessages();
+    renderOptions();
   }
 
   function renderMessages() {
@@ -327,6 +337,71 @@ export function createWidget(userConfig = {}) {
     });
   }
 
+  function renderOptions() {
+    if (!optionsNode) {
+      return;
+    }
+    optionsNode.innerHTML = '';
+    if (state.inputMode !== 'options') {
+      return;
+    }
+    state.options.forEach((option) => {
+      const button = createElement('button', {
+        className: 'eg-chat-option-button',
+        text: option.label,
+        type: 'button',
+      });
+      button.disabled = state.isLoading;
+      button.addEventListener('click', () => {
+        void sendStructuredMessage(option.value, option.label);
+      });
+      optionsNode.appendChild(button);
+    });
+  }
+
+  function loadStoredSessionId() {
+    try {
+      return window.localStorage.getItem(sessionStorageKey);
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function persistSessionId(sessionId) {
+    state.sessionId = sessionId;
+    try {
+      window.localStorage.setItem(sessionStorageKey, sessionId);
+    } catch (_error) {
+      // ignore storage failures
+    }
+  }
+
+  function applyStructuredResponse(payload) {
+    persistSessionId(payload.session_id);
+    setState({
+      initialized: true,
+      messages: payload.messages || [],
+      inputMode: payload.input_mode || 'text',
+      options: payload.options || [],
+      isLoading: false,
+      error: null,
+    });
+  }
+
+  async function ensureSessionLoaded() {
+    if (state.initialized || state.isLoading) {
+      return;
+    }
+    setState({ isLoading: true, error: null });
+    try {
+      const payload = await startSession(config.apiUrl, state.sessionId || loadStoredSessionId());
+      applyStructuredResponse(payload);
+    } catch (error) {
+      setState({ isLoading: false, error: 'No se pudo iniciar la sesión del chat.' });
+      emit('onError', error);
+    }
+  }
+
   function open() {
     if (state.isOpen) {
       return;
@@ -336,6 +411,7 @@ export function createWidget(userConfig = {}) {
     requestAnimationFrame(() => {
       inputNode?.focus();
     });
+    void ensureSessionLoaded();
   }
 
   function close() {
@@ -366,24 +442,21 @@ export function createWidget(userConfig = {}) {
       return;
     }
 
-    appendMessage({
-      id: crypto.randomUUID(),
-      role: 'user',
-      text,
-    });
-    emit('onMessageSent', { message: text });
     inputNode.value = '';
-    setState({ isLoading: true, error: null });
+    await sendStructuredMessage(text, text);
+  }
 
+  async function sendStructuredMessage(value, visibleText) {
+    setState({ isLoading: true, error: null });
     try {
-      const responseText = await sendChatMessage(config.apiUrl, text);
-      appendMessage({
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        text: responseText,
-      });
-      emit('onMessageReceived', { message: responseText });
-      setState({ isLoading: false, error: null });
+      const payload = await sendSessionMessage(
+        config.apiUrl,
+        state.sessionId || loadStoredSessionId(),
+        value,
+      );
+      applyStructuredResponse(payload);
+      emit('onMessageSent', { message: visibleText });
+      emit('onMessageReceived', { message: payload.messages?.[payload.messages.length - 1]?.text || '' });
     } catch (error) {
       const fallbackMessage = config.errorMessage;
       appendMessage({
