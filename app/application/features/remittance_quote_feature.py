@@ -18,7 +18,7 @@ class RemittanceQuoteFeature:
                     "destination_currency": quote.get("destination_currency"),
                     "amount_send": quote.get("amount_send"),
                     "amount_receive": quote.get("amount_receive"),
-                    "commission": quote.get("commission"),
+                    "commission": quote.get("commission_gross", quote.get("commission")),
                     "total_to_send": quote.get("total_to_send"),
                     "rate": quote.get("rate"),
                     "coupon_code": quote.get("coupon_code"),

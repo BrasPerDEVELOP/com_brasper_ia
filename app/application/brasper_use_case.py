@@ -269,7 +269,7 @@ class BrasperUseCase:
         normalized_desired_receive = self._round(desired_receive)
         estimate_send = max(self._round(normalized_desired_receive / rate), 0.01)
 
-        for _ in range(8):
+        for _ in range(24):
             commission_rate = self._get_commission_rate_for_amount(ranges, estimate_send)
             base_commission = self._round(estimate_send * commission_rate)
             coupon_discount_amount = self._coupon_discount_amount(coupon, base_commission)
@@ -278,20 +278,21 @@ class BrasperUseCase:
             if net_amount <= 0:
                 break
             next_estimate = self._round((normalized_desired_receive / rate) * (estimate_send / net_amount))
-            if abs(next_estimate - estimate_send) < 0.01:
+            if abs(next_estimate - estimate_send) < 0.001:
                 estimate_send = next_estimate
                 break
             estimate_send = next_estimate
 
         return estimate_send
 
-    def _calculate_direct(self, amount_send, rate, ranges, coupon):
+    def _quote_from_gross_send(self, amount_send, rate, ranges, coupon):
+        """Cotiza a partir del monto bruto que paga el cliente (igual que la app Brasper)."""
         normalized_amount_send = self._round(amount_send)
         commission_rate = self._get_commission_rate_for_amount(ranges, normalized_amount_send)
         base_commission = self._round(normalized_amount_send * commission_rate)
         coupon_discount_amount = self._coupon_discount_amount(coupon, base_commission)
-        commission = self._round(max(base_commission - coupon_discount_amount, 0))
-        total_to_send = self._round(normalized_amount_send - commission)
+        commission_net = self._round(max(base_commission - coupon_discount_amount, 0))
+        total_to_send = self._round(normalized_amount_send - commission_net)
         amount_receive = self._round(total_to_send * rate)
         selected = self._range_for_amount(ranges, normalized_amount_send)
         return {
@@ -299,7 +300,10 @@ class BrasperUseCase:
             "amount_send_without_promotion": normalized_amount_send,
             "amount_receive": amount_receive,
             "rate": float(rate),
-            "commission": commission,
+            # commission neta (tras cupón sobre comisión): lo que resta del bruto para convertir
+            "commission": commission_net,
+            # comisión bruta (antes del cupón): es la que muestra la app en "Comisión"
+            "commission_gross": base_commission,
             "commission_rate": self._round(commission_rate * 100),
             "total_to_send": total_to_send,
             "coupon_discount": self._round(
@@ -310,29 +314,31 @@ class BrasperUseCase:
             "commission_id": selected["id"] if selected else None,
         }
 
+    def _calculate_direct(self, amount_send, rate, ranges, coupon):
+        return self._quote_from_gross_send(amount_send, rate, ranges, coupon)
+
     def _calculate_inverse(self, desired_receive, rate, ranges, coupon):
-        base_amount_send = self._estimate_base_amount_send_from_receive(desired_receive, rate, ranges, coupon)
-        commission_rate = self._get_commission_rate_for_amount(ranges, base_amount_send)
-        base_commission = self._round(base_amount_send * commission_rate)
-        coupon_discount_amount = self._coupon_discount_amount(coupon, base_commission)
-        commission = self._round(max(base_commission - coupon_discount_amount, 0))
-        total_to_send = self._round(base_amount_send - commission)
-        selected = self._range_for_amount(ranges, base_amount_send)
-        return {
-            "amount_send": self._round(base_amount_send),
-            "amount_send_without_promotion": self._round(base_amount_send),
-            "amount_receive": self._round(total_to_send * rate),
-            "rate": float(rate),
-            "commission": commission,
-            "commission_rate": self._round(commission_rate * 100),
-            "total_to_send": total_to_send,
-            "coupon_discount": self._round(
-                (coupon_discount_amount / base_commission) * 100
-            ) if base_commission > 0 else 0,
-            "coupon_code": coupon["code"] if coupon else None,
-            "coupon_savings_amount": coupon_discount_amount,
-            "commission_id": selected["id"] if selected else None,
-        }
+        target = self._round(desired_receive)
+        base_amount_send = self._estimate_base_amount_send_from_receive(target, rate, ranges, coupon)
+        base_amount_send = self._round(max(base_amount_send, 0.01))
+        q = self._quote_from_gross_send(base_amount_send, rate, ranges, coupon)
+        best = dict(q)
+        best_err = abs(q["amount_receive"] - target)
+        for _ in range(600):
+            if best_err <= 0.005:
+                break
+            if q["amount_receive"] < target - 0.002:
+                base_amount_send = self._round(base_amount_send + 0.01)
+            elif q["amount_receive"] > target + 0.002:
+                base_amount_send = self._round(max(0.01, base_amount_send - 0.01))
+            else:
+                break
+            q = self._quote_from_gross_send(base_amount_send, rate, ranges, coupon)
+            err = abs(q["amount_receive"] - target)
+            if err < best_err:
+                best_err = err
+                best = dict(q)
+        return best
 
     def quote_exchange_operation(self, args=None):
         args = args or {}
@@ -381,7 +387,7 @@ class BrasperUseCase:
             "summary_text": (
                 f"{copy['quote_title']}: {copy['send_label']} {self._fmt(quote['amount_send'])} {origin_currency}, "
                 f"{copy['rate_label']} {quote['rate']:.4f}, "
-                f"{copy['commission_label']} {self._fmt(quote['commission'])} {origin_currency}, "
+                f"{copy['commission_label']} {self._fmt(quote.get('commission_gross', quote['commission']))} {origin_currency}, "
                 f"{copy['receive_label']} {self._fmt(quote['amount_receive'])} {destination_currency}."
                 f"{coupon_line}"
             ),
