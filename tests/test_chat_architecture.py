@@ -214,6 +214,16 @@ class ChatArchitectureTests(unittest.TestCase):
         self.assertEqual(normalized["extracted_data"]["destination_currency"], "BRL")
         self.assertEqual(normalized["extracted_data"]["receive_amount"], 1000.0)
 
+    def test_brand_phrase_does_not_count_as_full_name(self):
+        """Marcas tipo 'Que Descuentos' no deben llenar nombre+apellido y bloquear la petición de datos."""
+        pre = self.policy_engine.pre_process("Soy Que Descuentos envio 3000 brl a pen", {})
+        out = self.policy_engine.post_process("Soy Que Descuentos envio 3000 brl a pen", {}, None, pre)
+        self.assertFalse(
+            str(out["extracted_data"].get("name") or "").strip()
+            and str(out["extracted_data"].get("last") or "").strip(),
+            "No debe inferir nombre y apellido desde copy de marca/cupón",
+        )
+
     def test_bare_amount_updates_existing_send_quote(self):
         normalized = self.policy_engine.post_process(
             "250",
@@ -237,7 +247,7 @@ class ChatArchitectureTests(unittest.TestCase):
             ),
         )
         self.assertEqual(normalized["extracted_data"]["send_amount"], 250.0)
-        self.assertIsNone(normalized["extracted_data"]["receive_amount"])
+        self.assertIsNone(normalized["extracted_data"].get("receive_amount"))
         self.assertEqual(normalized["extracted_data"]["quote_mode"], "send")
 
     def test_inverse_quote_matches_direct_formula(self):

@@ -7,8 +7,8 @@ class ConversationStateService:
         self.cache_adapter = cache_adapter
 
     def load(self, user_id: str, message: str) -> ConversationContext:
-        history = self.memory_port.get_memory(user_id) or []
-        history = history[-4:]
+        # Cada consulta entra aislada: no reutilizamos historial conversacional previo.
+        history = []
         cached_lead = self.cache_adapter.get(f"lead:{user_id}") or {}
         memory_lead = self.memory_port.get_memory_lead(user_id) or {}
         lead_state = {**cached_lead, **memory_lead}
@@ -24,13 +24,9 @@ class ConversationStateService:
         )
 
     def remember_turn(self, user_id: str, message: str, answer: str):
-        self.memory_port.save_memory(
-            user_id,
-            [
-                {"role": "user", "content": message},
-                {"role": "assistant", "content": answer},
-            ],
-        )
+        # Se desactiva la persistencia del chat para evitar contexto acumulado
+        # entre preguntas independientes.
+        return None
 
     def save_score(self, user_id: str, score: int):
         self.memory_port.save_memory_score(user_id, {"score": score})

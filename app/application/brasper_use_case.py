@@ -73,6 +73,7 @@ class BrasperUseCase:
                 "coupon_available": "Cupón disponible",
                 "summary": "Para tu operación de {amount_send} {origin_currency}, recibirás {amount_receive} {destination_currency}.",
                 "advisor": "Para seguir con un asesor, abrí el enlace de WhatsApp abajo.",
+                "advisor_prefill_hint": "Mensaje sugerido para el asesor (se abre en WhatsApp; podés editarlo):",
             },
             "pt": {
                 "invalid_pair": "A Brasper opera apenas BRL para PEN, PEN para BRL, BRL para USD e USD para BRL.",
@@ -89,6 +90,7 @@ class BrasperUseCase:
                 "coupon_available": "Cupom disponível",
                 "summary": "Para sua operação de {amount_send} {origin_currency}, você receberá {amount_receive} {destination_currency}.",
                 "advisor": "Para falar com um assessor, use o link do WhatsApp abaixo.",
+                "advisor_prefill_hint": "Mensagem sugerida para o assessor (abre no WhatsApp; você pode editar):",
             },
             "en": {
                 "invalid_pair": "Brasper currently supports only BRL to PEN, PEN to BRL, BRL to USD, and USD to BRL.",
@@ -105,6 +107,7 @@ class BrasperUseCase:
                 "coupon_available": "Available coupon",
                 "summary": "For your operation of {amount_send} {origin_currency}, you will receive {amount_receive} {destination_currency}.",
                 "advisor": "To speak with an advisor, open the WhatsApp link below.",
+                "advisor_prefill_hint": "Suggested message for the advisor (opens in WhatsApp; you can edit it):",
             },
         }
         return catalog.get(language, catalog["es"])
@@ -439,9 +442,17 @@ class BrasperUseCase:
         args = args or {}
         language = args.get("language", "es")
         summary = str(args.get("summary") or "").strip()
-        advisor_copy = self._copy(language)["advisor"]
-        # En el chat: instrucción + contexto opcional. En WhatsApp al asesor: solo el mensaje del cliente.
-        message = f"{advisor_copy}\n\n{summary}" if summary else advisor_copy
+        copy_block = self._copy(language)
+        advisor_copy = copy_block["advisor"]
+        hint = copy_block.get("advisor_prefill_hint", "")
+        # En el chat: instrucción, luego texto sugerido separado (evita mezclar con el enlace).
+        # En WhatsApp al asesor: solo el resumen del cliente (wa_prefill).
+        if summary and hint:
+            message = f"{advisor_copy}\n\n{hint}\n\n{summary}"
+        elif summary:
+            message = f"{advisor_copy}\n\n{summary}"
+        else:
+            message = advisor_copy
         wa_prefill = summary if summary else advisor_copy
         wa_link = f"https://wa.me/{self.whatsapp_number}?text={quote(wa_prefill)}"
         return {

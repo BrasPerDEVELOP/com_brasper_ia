@@ -2,6 +2,9 @@
 Acumula mensajes por usuario y llama al chat una sola vez tras un silencio (debounce).
 Reduce llamadas al LLM cuando el usuario envía varias líneas seguidas.
 
+Los fragmentos se unen con línea en blanco entre sí (no con un solo espacio), para que cada
+burbuja o línea del usuario siga distinguible al procesarlos "de uno en uno".
+
 Variables de entorno:
 - CHAT_DEBOUNCE_SECONDS: segundos de espera (0 = desactivado, comportamiento anterior).
 - CHAT_DEBOUNCE_IMMEDIATE_MIN_WORDS: si el mensaje tiene al menos N palabras, sin debounce (respuesta inmediata).
@@ -15,6 +18,13 @@ from collections import defaultdict
 from typing import Any, Awaitable, Callable, Optional
 
 ExecuteFn = Callable[[str, str], str]
+
+# Separador entre mensajes acumulados: evita pegar frases distintas en un solo párrafo ilegible.
+_MESSAGE_JOINER = "\n\n"
+
+
+def _join_buffered_messages(parts: list[str]) -> str:
+    return _MESSAGE_JOINER.join(p.strip() for p in parts if p and str(p).strip()).strip()
 
 
 def _debounce_seconds() -> float:
@@ -98,7 +108,7 @@ class ChatDebouncer:
                 fut.set_exception(RuntimeError("buffer vacío tras debounce"))
             return
 
-        full = " ".join(messages).strip()
+        full = _join_buffered_messages(messages)
         if not full:
             if fut and not fut.done():
                 fut.set_exception(RuntimeError("mensaje vacío"))
@@ -164,7 +174,7 @@ class ChatDebouncer:
         if not messages or not phone_number_id:
             return
 
-        full = " ".join(messages).strip()
+        full = _join_buffered_messages(messages)
         if not full:
             return
 

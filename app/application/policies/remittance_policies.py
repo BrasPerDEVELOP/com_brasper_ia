@@ -297,6 +297,41 @@ class RemittancePolicyEngine:
             "necesito",
             "por",
             "favor",
+            "soy",
+        }
+    )
+    # Palabras al inicio que no son el nombre (evita "Soy Ana" → nombre "Soy").
+    _NAME_LEADING_INTROS = frozenset(
+        {
+            "soy",
+            "me",
+            "llamo",
+            "llámame",
+            "somos",
+            "mi",
+            "mis",
+            "nosotros",
+            "nombre",
+            "es",
+        }
+    )
+    # Cupón / marca / copy comercial: no usar como nombre+apellido de persona.
+    _NAME_BUSINESS_MARKERS = frozenset(
+        {
+            "descuentos",
+            "descuento",
+            "exclusivos",
+            "exclusivo",
+            "cupon",
+            "cupón",
+            "cupones",
+            "promocion",
+            "promoción",
+            "empresa",
+            "marca",
+            "canal",
+            "tienda",
+            "oficial",
         }
     )
 
@@ -305,12 +340,16 @@ class RemittancePolicyEngine:
             return None, None
         cleaned = re.sub(r"[^A-Za-zÁÉÍÓÚáéíóúÑñÇçãõâêôü'\-\s]", " ", message or "")
         tokens = [token for token in cleaned.split() if len(token) > 1]
+        while tokens and tokens[0].lower() in self._NAME_LEADING_INTROS:
+            tokens = tokens[1:]
         if len(tokens) < 2:
             return None, None
         lower_tokens = [token.lower() for token in tokens]
         if any(token in self._REMITTANCE_HINTS for token in lower_tokens):
             return None, None
         if any(token in self._NAME_STOPWORDS for token in lower_tokens):
+            return None, None
+        if any(token in self._NAME_BUSINESS_MARKERS for token in lower_tokens):
             return None, None
         return tokens[0].title(), tokens[1].title()
 
