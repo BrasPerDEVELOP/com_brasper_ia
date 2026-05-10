@@ -1,72 +1,79 @@
 from app.domain.ports.output.memoryport import MemoryPort
-class MemoryAdapter(MemoryPort):
-    def __init__(self):
-        self._storage={}
-        self.score_storage={}
-        self.lead_profile_storage={}
-        super().__init__()
-    #memoria conversacional
-    def save_memory(self,user_id:str,memory:list)->str:
-        print(f"Se guardo la memoria {memory}")
-        if user_id not in self._storage:
-            self._storage[user_id]=[]
-            print("Se creo el storage")
-            print(self._storage)
-        #  guardar nuevos mensajes
-        self._storage[user_id].extend(memory)
 
-        #  limitar memoria 10 mensajes     
+class MemoryAdapter(MemoryPort):
+    def __init__(self, cache_adapter=None):
+        self.cache_adapter = cache_adapter
+        # Fallback for when cache_adapter is not provided (legacy or testing)
+        self._storage = {}
+        self.score_storage = {}
+        self.lead_profile_storage = {}
+        super().__init__()
+
+    def _get_key(self, user_id: str, suffix: str) -> str:
+        return f"user:{user_id}:{suffix}"
+
+    # memoria conversacional
+    def save_memory(self, user_id: str, memory: list) -> str:
+        print(f"Persistiendo memoria en Redis para {user_id}: {memory}")
+        if self.cache_adapter:
+            key = self._get_key(user_id, "history")
+            existing = self.cache_adapter.get(key) or []
+            existing.extend(memory)
+            # Limitar a los últimos 15 mensajes para no saturar el contexto
+            self.cache_adapter.save(key, existing[-15:], ttl=86400) # 24h
+            return "okay"
+        
+        # Fallback in-memory
+        if user_id not in self._storage:
+            self._storage[user_id] = []
+        self._storage[user_id].extend(memory)
         self._storage[user_id] = self._storage[user_id][-10:]
-        #print("Memoria actualizada: ",self._storage[user_id])
-        #print("Memoria completa")
-        #print("Memoria completa")
-        #print("Memoria completa")
-        #print(self._storage)
         return "okay"
-     #obtener memoria conversacional
-    def get_memory(self,user_id:str):
-        return self._storage.get(user_id,[])
+
+    # obtener memoria conversacional
+    def get_memory(self, user_id: str):
+        if self.cache_adapter:
+            return self.cache_adapter.get(self._get_key(user_id, "history")) or []
+        return self._storage.get(user_id, [])
+
     # memoria score
-    def save_memory_score(self, user_id:str, memory:dict):
-        print(f"Se guardo la memoria del score {memory}")
-        #Busca si existe una coincidencia
-        if user_id not in self.score_storage:
-            self.score_storage[user_id]={"score":0}
-        #prev_score= self.score_storage[user_id]["score"]
-        #new_score= prev_score + memory["score"]
+    def save_memory_score(self, user_id: str, memory: dict):
+        if self.cache_adapter:
+            self.cache_adapter.save(self._get_key(user_id, "score"), memory, ttl=86400)
+            return {"status": "ok"}
         
-        #print("Memoria score",new_score)
-        
-        self.score_storage[user_id]={
-            "score":memory["score"]
-        }
-        #print("Memoria score adapter",self.score_storage)
-        return {"status":"ok"}
-    #obtener memoria score
-    def get_memory_score(self, user_id:str):
-        return self.score_storage.get(user_id,{"score":0})
+        self.score_storage[user_id] = {"score": memory["score"]}
+        return {"status": "ok"}
+
+    # obtener memoria score
+    def get_memory_score(self, user_id: str):
+        if self.cache_adapter:
+            return self.cache_adapter.get(self._get_key(user_id, "score")) or {"score": 0}
+        return self.score_storage.get(user_id, {"score": 0})
+
     # obtener memoria bullets
-    def get_memory_lead(self,user_id:str):
-        return self.lead_profile_storage.get(user_id,
-               {"language":None,
-                "destination_currency":None,
-                "send_amount":None,
-                "origin_currency":None,
-                "urgency":None})
+    def get_memory_lead(self, user_id: str):
+        default_lead = {
+            "language": None,
+            "destination_currency": None,
+            "send_amount": None,
+            "origin_currency": None,
+            "urgency": None
+        }
+        if self.cache_adapter:
+            return self.cache_adapter.get(self._get_key(user_id, "lead_profile")) or default_lead
+        return self.lead_profile_storage.get(user_id, default_lead)
+
     # memoria bullets importantes
-    def save_memory_lead(self,user_id:str,memory:dict):
-        if user_id not in self.lead_profile_storage:
-            self.lead_profile_storage[user_id]={
-                "language":None,
-                "destination_currency":None,
-                "send_amount":None,
-                "origin_currency":None,
-                "urgency":None}
-            print("Memoria Lead",self.lead_profile_storage)
-        
-        profile=self.lead_profile_storage[user_id]
-        for key in["language","destination_currency","send_amount","origin_currency","urgency"]:
+    def save_memory_lead(self, user_id: str, memory: dict):
+        current = self.get_memory_lead(user_id)
+        for key in ["language", "destination_currency", "send_amount", "origin_currency", "urgency"]:
             if memory.get(key) is not None:
-                profile[key]=memory[key]
-        print("Memoria lead profile",profile)
-        return {"status":"ok"}
+                current[key] = memory[key]
+        
+        if self.cache_adapter:
+            self.cache_adapter.save(self._get_key(user_id, "lead_profile"), current, ttl=86400)
+        else:
+            self.lead_profile_storage[user_id] = current
+            
+        return {"status": "ok"}

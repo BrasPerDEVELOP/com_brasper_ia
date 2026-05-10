@@ -41,7 +41,7 @@ crm_use_case=CRMUseCase(crm_adapter, cache_adapter=redis_cache_adapter)
 brasper_use_case = BrasperUseCase()
 
 toolrouter=ToolRouter(calendar_use_case, crm_use_case, brasper_use_case)
-memory_adapter=MemoryAdapter()
+memory_adapter=MemoryAdapter(redis_cache_adapter)
 
 llm_adapter=ModelAdapter()
 
@@ -81,14 +81,14 @@ class Message(BaseModel):
 
 #realizar peticion al chat
 @router.post("/consulta-chat")
-async def consultar(user_id: str, message_user: str):
-    response = await chat_debouncer.add_and_wait(user_id, message_user)
-    return {"response": response}
+async def consultar(user_id: str, message_user: str, conversation_id: str = "default"):
+    response = await chat_debouncer.add_and_wait(user_id, message_user, conversation_id=conversation_id)
+    return {"response": response, "conversation_id": conversation_id}
 
 @router.post("/consulta-webchat")
-async def consultarWebChat(message_user: Message):
-    response = await chat_debouncer.add_and_wait("51990966022", message_user.message)  # type: ignore[arg-type]
-    return {"response": response}
+async def consultarWebChat(message_user: Message, conversation_id: str = "webchat"):
+    response = await chat_debouncer.add_and_wait("51990966022", message_user.message, conversation_id=conversation_id)  # type: ignore[arg-type]
+    return {"response": response, "conversation_id": conversation_id}
 
 #guardar lead (pruebas)
 @router.post("/save-lead")
@@ -108,6 +108,18 @@ def createDate(summary:str,start:str,end:str):
 def getDate():
     response=calendar_use_case.execute_date()
     return {"response":response}
+
+# Listar conversaciones de un usuario
+@router.get("/user/{user_id}/conversations")
+async def get_user_conversations(user_id: str):
+    chats = redis_cache_adapter.get_set_intersection([f"chats:{user_id}"])
+    return {"user_id": user_id, "conversations": list(chats)}
+
+# Obtener historial de una conversación específica
+@router.get("/user/{user_id}/conversation/{conversation_id}")
+async def get_conversation_history(user_id: str, conversation_id: str):
+    history = memory_adapter.get_memory(f"{user_id}:{conversation_id}")
+    return {"user_id": user_id, "conversation_id": conversation_id, "history": history}
 
 #Webhook whatsapp
 @router.get("/webhook")

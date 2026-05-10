@@ -17,7 +17,7 @@ import os
 from collections import defaultdict
 from typing import Any, Awaitable, Callable, Optional
 
-ExecuteFn = Callable[[str, str], str]
+ExecuteFn = Callable[[str, str, Optional[str]], str]
 
 # Separador entre mensajes acumulados: evita pegar frases distintas en un solo párrafo ilegible.
 _MESSAGE_JOINER = "\n\n"
@@ -71,37 +71,40 @@ class ChatDebouncer:
             return False
         return len(message.split()) >= self._immediate_min_words
 
-    async def add_and_wait(self, user_id: str, message: str) -> str:
+    async def add_and_wait(self, user_id: str, message: str, conversation_id: Optional[str] = None) -> str:
         """HTTP: espera a la ventana de silencio y devuelve una sola respuesta."""
         loop = asyncio.get_running_loop()
         if self._debounce <= 0:
-            return await loop.run_in_executor(None, lambda: self._execute(user_id, message))
+            return await loop.run_in_executor(None, lambda: self._execute(user_id, message, conversation_id))
         if self._immediate(message):
-            return await loop.run_in_executor(None, lambda: self._execute(user_id, message))
+            return await loop.run_in_executor(None, lambda: self._execute(user_id, message, conversation_id))
 
         async with self._lock:
-            self._buffers[user_id].append(message)
-            if user_id not in self._futures or self._futures[user_id].done():
-                self._futures[user_id] = loop.create_future()
-            fut = self._futures[user_id]
+            # Buffer key should probably include conversation_id to avoid mixing messages
+            buffer_key = f"{user_id}:{conversation_id or 'default'}"
+            self._buffers[buffer_key].append(message)
+            if buffer_key not in self._futures or self._futures[buffer_key].done():
+                self._futures[buffer_key] = loop.create_future()
+            fut = self._futures[buffer_key]
 
-            if user_id in self._tasks:
-                self._tasks[user_id].cancel()
+            if buffer_key in self._tasks:
+                self._tasks[buffer_key].cancel()
 
-            self._tasks[user_id] = asyncio.create_task(self._flush_http(user_id))
+            self._tasks[buffer_key] = asyncio.create_task(self._flush_http(user_id, conversation_id))
 
         return await fut
 
-    async def _flush_http(self, user_id: str) -> None:
+    async def _flush_http(self, user_id: str, conversation_id: Optional[str] = None) -> None:
+        buffer_key = f"{user_id}:{conversation_id or 'default'}"
         try:
             await asyncio.sleep(self._debounce)
         except asyncio.CancelledError:
             return
 
         async with self._lock:
-            messages = self._buffers.pop(user_id, [])
-            self._tasks.pop(user_id, None)
-            fut = self._futures.get(user_id)
+            messages = self._buffers.pop(buffer_key, [])
+            self._tasks.pop(buffer_key, None)
+            fut = self._futures.get(buffer_key)
 
         if not messages:
             if fut and not fut.done():
@@ -116,7 +119,7 @@ class ChatDebouncer:
 
         try:
             loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(None, lambda: self._execute(user_id, full))
+            result = await loop.run_in_executor(None, lambda: self._execute(user_id, full, conversation_id))
             if fut and not fut.done():
                 fut.set_result(result)
         except Exception as e:
@@ -134,14 +137,14 @@ class ChatDebouncer:
         loop = asyncio.get_running_loop()
         if self._debounce <= 0:
             try:
-                text = await loop.run_in_executor(None, lambda: self._execute(user_id, message))
+                text = await loop.run_in_executor(None, lambda: self._execute(user_id, message, "whatsapp"))
                 await send_message(text, user_id, phone_number_id)
             except Exception as e:
                 print(f"[whatsapp debounce] {e}")
             return
         if self._immediate(message):
             try:
-                text = await loop.run_in_executor(None, lambda: self._execute(user_id, message))
+                text = await loop.run_in_executor(None, lambda: self._execute(user_id, message, "whatsapp"))
                 await send_message(text, user_id, phone_number_id)
             except Exception as e:
                 print(f"[whatsapp debounce] {e}")
@@ -180,7 +183,7 @@ class ChatDebouncer:
 
         loop = asyncio.get_running_loop()
         try:
-            text = await loop.run_in_executor(None, lambda: self._execute(user_id, full))
+            text = await loop.run_in_executor(None, lambda: self._execute(user_id, full, "whatsapp"))
             await send_message(text, user_id, phone_number_id)
         except Exception as e:
             print(f"[whatsapp debounce] {e}")

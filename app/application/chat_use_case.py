@@ -21,12 +21,12 @@ class ChatUseCase:
         self.lead_tracking_service = lead_tracking_service
         self.response_builder = response_builder
 
-    def execute(self, user_id: str, message_user: str) -> str:
-        context = self.conversation_state_service.load(user_id, message_user)
+    def execute(self, user_id: str, message_user: str, conversation_id: str = "default") -> str:
+        context = self.conversation_state_service.load(user_id, message_user, conversation_id=conversation_id)
         result, decision = self.orchestador.run(context)
         self.lead_tracking_service.apply(context, decision, result)
 
         answer = self.response_builder.build(result)
-        self.conversation_state_service.remember_turn(user_id, message_user, answer)
-        print("USE CASE RESPUESTA", answer)
+        self.conversation_state_service.remember_turn(user_id, message_user, answer, conversation_id=conversation_id)
+        print(f"USE CASE RESPUESTA ({conversation_id})", answer)
         return answer
