@@ -44,14 +44,14 @@ class RemittanceQuoteFeature:
         if not data.get("origin_currency"):
             return FeatureResult(
                 type="quote_result",
-                message=self.policy_engine.copy(language, "ask_origin"),
+                message=self.policy_engine.copy(language, "quote_incomplete"),
                 lead_updates=data,
                 tracking_events=[DomainEvent(name="quote_requested", payload={"missing": "origin_currency"})],
             )
         if not data.get("destination_currency"):
             return FeatureResult(
                 type="quote_result",
-                message=self.policy_engine.copy(language, "ask_destination"),
+                message=self.policy_engine.copy(language, "quote_incomplete"),
                 lead_updates=data,
                 tracking_events=[DomainEvent(name="quote_requested", payload={"missing": "destination_currency"})],
             )
@@ -66,7 +66,7 @@ class RemittanceQuoteFeature:
         if amount is None:
             return FeatureResult(
                 type="quote_result",
-                message=self.policy_engine.copy(language, "ask_amount"),
+                message=self.policy_engine.copy(language, "quote_incomplete"),
                 lead_updates=data,
                 tracking_events=[DomainEvent(name="quote_requested", payload={"missing": "amount"})],
             )
@@ -93,27 +93,18 @@ class RemittanceQuoteFeature:
 
         message = quote.get("summary_text", self.policy_engine.copy(language, "fallback"))
         whatsapp_link = self._build_whatsapp_link(quote, language)
-        merged_profile = {**(context.lead_state or {}), **data}
-        has_full_name = str(merged_profile.get("name") or "").strip() and str(
-            merged_profile.get("last") or ""
-        ).strip()
 
         if self._is_true(data.get("wants_advisor")):
-            if not has_full_name:
-                message = (
-                    f"{message}\n\n{self.policy_engine.copy(language, 'need_name_before_advisor')}\n\n{whatsapp_link}"
-                )
-            else:
-                handoff = self.tool_router.router(
-                    {
-                        "name": "handoff_to_advisor",
-                        "args": {"language": language, "summary": message},
-                    }
-                )
-                wa_link = handoff.get("wa_link")
-                message = handoff.get("message", message)
-                if wa_link:
-                    message = f"{message}\n\n{wa_link}"
+            handoff = self.tool_router.router(
+                {
+                    "name": "handoff_to_advisor",
+                    "args": {"language": language, "summary": message},
+                }
+            )
+            wa_link = handoff.get("wa_link")
+            message = handoff.get("message", message)
+            if wa_link:
+                message = f"{message}\n\n{wa_link}"
         else:
             message = f"{message}\n\n{whatsapp_link}"
 
@@ -128,8 +119,6 @@ class RemittanceQuoteFeature:
                 "quote_mode": mode,
             }
         )
-        if self._is_true(data.get("wants_advisor")) and not has_full_name:
-            lead_updates["pending_handoff_prereq"] = True
 
         return FeatureResult(
             type="quote_result",

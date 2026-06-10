@@ -9,7 +9,7 @@ class HandoffFeature:
 
     def execute(self, context, decision: dict) -> FeatureResult:
         language = decision.get("language") or "es"
-        merged = {**(context.lead_state or {}), **(decision.get("extracted_data") or {})}
+        merged = decision.get("extracted_data") or {}
         payload = build_advisor_summary_data(context.user_id, merged)
         summary = (self._llm_port.generate_summary(payload) or {}).get("summary", "")
         handoff = self.tool_router.router(
@@ -22,11 +22,10 @@ class HandoffFeature:
         wa_link = handoff.get("wa_link")
         if wa_link:
             message = f"{message}\n\n{wa_link}"
-        handoff_lead = {**(decision.get("extracted_data") or {}), "pending_handoff_prereq": False}
         return FeatureResult(
             type="handoff_result",
             message=message,
             metadata={"wa_link": wa_link},
-            lead_updates=handoff_lead,
+            lead_updates=decision.get("extracted_data") or {},
             tracking_events=[DomainEvent(name="handoff_requested", payload={"language": language})],
         )

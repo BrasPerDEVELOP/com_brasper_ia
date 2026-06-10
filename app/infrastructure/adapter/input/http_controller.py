@@ -1,5 +1,6 @@
 import asyncio
 import os
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 from app.infrastructure.adapter.output.crm_adapter import CRMAdapter
@@ -76,6 +77,7 @@ whatsapp_adapter = WhatsappAdapter()
 
 class Message(BaseModel):
     message: str
+    session_id: Optional[str] = None
 
 #adaptadores de entraa
 
@@ -86,15 +88,16 @@ async def consultar(user_id: str, message_user: str, conversation_id: str = "def
     return {"response": response, "conversation_id": conversation_id}
 
 @router.post("/consulta-webchat")
-async def consultarWebChat(message_user: Message, conversation_id: str = "webchat"):
-    response = await chat_debouncer.add_and_wait("51990966022", message_user.message, conversation_id=conversation_id)  # type: ignore[arg-type]
-    return {"response": response, "conversation_id": conversation_id}
+async def consultarWebChat(message_user: Message, conversation_id: Optional[str] = None):
+    session_id = (conversation_id or message_user.session_id or "webchat").strip()
+    user_id = f"webchat:{session_id}"
+    response = await chat_debouncer.add_and_wait(user_id, message_user.message, conversation_id=session_id)
+    return {"response": response, "conversation_id": session_id}
 
 #guardar lead (pruebas)
 @router.post("/save-lead")
 def savelead(name:str,last:str,phone:str):
-    response=crm_use_case.execute(name,last,phone)
-    return {"response":response}
+    raise HTTPException(status_code=410, detail="El guardado de leads desde el chat esta deshabilitado.")
 
 #guardar cita
 @router.post("/create-date")
@@ -112,14 +115,12 @@ def getDate():
 # Listar conversaciones de un usuario
 @router.get("/user/{user_id}/conversations")
 async def get_user_conversations(user_id: str):
-    chats = redis_cache_adapter.get_set_intersection([f"chats:{user_id}"])
-    return {"user_id": user_id, "conversations": list(chats)}
+    return {"user_id": user_id, "conversations": []}
 
 # Obtener historial de una conversación específica
 @router.get("/user/{user_id}/conversation/{conversation_id}")
 async def get_conversation_history(user_id: str, conversation_id: str):
-    history = memory_adapter.get_memory(f"{user_id}:{conversation_id}")
-    return {"user_id": user_id, "conversation_id": conversation_id, "history": history}
+    return {"user_id": user_id, "conversation_id": conversation_id, "history": []}
 
 #Webhook whatsapp
 @router.get("/webhook")
@@ -135,7 +136,8 @@ async def verify_webhook(
 @router.post("/webhook")
 async def receive_message(request: Request):
     body = await request.json()
-    print("Mensaje recibido:", body)
+    entries_count = len(body.get("entry") or []) if isinstance(body, dict) else 0
+    print(f"Webhook WhatsApp recibido: entries={entries_count}")
 
     try:
         # Verifica si es un mensaje de texto de WhatsApp

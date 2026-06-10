@@ -15,11 +15,24 @@ load_dotenv()
 import json
 
 # DeepSeek: usa DEEPSEEK_API_KEY; si no existe, OPENAI_API_KEY (compatible con LangChain)
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError(
         "Falta la API key del LLM. Define DEEPSEEK_API_KEY o OPENAI_API_KEY en tu .env"
     )
+model_name = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+max_output_tokens = _int_env("DEEPSEEK_MAX_OUTPUT_TOKENS", 500)
 tool_calls = [
     get_supported_currencies_schema,
     get_exchange_rates_schema,
@@ -34,11 +47,11 @@ class ModelAdapter(LLMPort):
     #instanciar en el constructor el memoryport
     def __init__(self):
         self.llm=ChatOpenAI(
-                            model="deepseek-chat",
+                            model=model_name,
                             api_key=api_key,
-                            base_url="https://api.deepseek.com/v1",
+                            base_url=base_url,
                             temperature=0,
-                            max_tokens=500
+                            max_tokens=max_output_tokens
         )
         #extraer respuesta
     def generate_response(self, messages:list):
@@ -63,7 +76,6 @@ class ModelAdapter(LLMPort):
             return self._fallback()
 
         content = messages.strip()
-        print("CONTENIDO STRIP ",content)
         # 1. limpiar markdown ```json
         if content.startswith("```"):
             content = content.replace("```json", "").replace("```", "").strip()
@@ -92,8 +104,6 @@ class ModelAdapter(LLMPort):
         try:
 
             content = text or ""
-            print("respuesta cruda:", content)
-
             #match = re.search(r"\{.*\}", content, re.DOTALL)
             
             extract = {

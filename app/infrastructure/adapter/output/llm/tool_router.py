@@ -40,4 +40,4 @@ class ToolRouter():
         if name=="handoff_to_advisor":
             return self.brasper_use_case.handoff_to_advisor(args)
 
-        return ValueError(f"Tool no soportada {name}")
+        raise ValueError(f"Tool no soportada {name}")

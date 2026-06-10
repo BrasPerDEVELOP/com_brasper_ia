@@ -14,7 +14,6 @@ class MemoryAdapter(MemoryPort):
 
     # memoria conversacional
     def save_memory(self, user_id: str, memory: list) -> str:
-        print(f"Persistiendo memoria en Redis para {user_id}: {memory}")
         if self.cache_adapter:
             key = self._get_key(user_id, "history")
             existing = self.cache_adapter.get(key) or []
@@ -55,8 +54,15 @@ class MemoryAdapter(MemoryPort):
     def get_memory_lead(self, user_id: str):
         default_lead = {
             "language": None,
+            "name": None,
+            "last": None,
+            "email": None,
+            "documentNumber": None,
             "destination_currency": None,
             "send_amount": None,
+            "receive_amount": None,
+            "quote_mode": None,
+            "coupon_code": None,
             "origin_currency": None,
             "urgency": None
         }
@@ -67,7 +73,20 @@ class MemoryAdapter(MemoryPort):
     # memoria bullets importantes
     def save_memory_lead(self, user_id: str, memory: dict):
         current = self.get_memory_lead(user_id)
-        for key in ["language", "destination_currency", "send_amount", "origin_currency", "urgency"]:
+        for key in [
+            "language",
+            "name",
+            "last",
+            "email",
+            "documentNumber",
+            "destination_currency",
+            "send_amount",
+            "receive_amount",
+            "quote_mode",
+            "coupon_code",
+            "origin_currency",
+            "urgency",
+        ]:
             if memory.get(key) is not None:
                 current[key] = memory[key]
         

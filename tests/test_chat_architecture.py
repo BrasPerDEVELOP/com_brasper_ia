@@ -86,6 +86,17 @@ class FakeLLM:
         return {"summary": f"Resumen test {data.get('name', '')}"}
 
 
+class InfoLLM(FakeLLM):
+    def generate_response(self, messages):
+        class Response:
+            content = "Brasper ayuda a enviar dinero y cambiar moneda entre Brasil y Perú usando BRL, PEN y USD."
+
+        return Response()
+
+    def extract_intent(self, content):
+        return {"answer": "", "intent": "", "extracted_data": {}}
+
+
 class ChatArchitectureTests(unittest.TestCase):
     def setUp(self):
         self.tool_router = FakeToolRouter()
@@ -115,7 +126,56 @@ class ChatArchitectureTests(unittest.TestCase):
         self.assertEqual(decision["intent"], "remittance_requirements")
         self.assertEqual(decision.get("metadata", {}).get("reason"), "brasper_info")
         self.assertEqual(result.type, "requirements_result")
-        self.assertIn("Brasper es un servicio", result.message)
+        self.assertIn("Brasper Transferencias se dedica", result.message)
+
+    def test_what_brasper_does_never_becomes_quote(self):
+        orchestrator = ConversationOrchestrator(FakeLLM(None), self.policy_engine, self.chat_router)
+        result, decision = orchestrator.run(self._context("a que se dedica brasper"))
+        self.assertEqual(decision["intent"], "remittance_requirements")
+        self.assertEqual(decision.get("metadata", {}).get("reason"), "brasper_info")
+        self.assertEqual(result.type, "requirements_result")
+        self.assertIn("Brasper Transferencias se dedica", result.message)
+        self.assertNotIn("Cotización Brasper", result.message)
+
+    def test_brasper_info_typo_is_not_generic_greeting(self):
+        orchestrator = ConversationOrchestrator(FakeLLM(None), self.policy_engine, self.chat_router)
+        result, decision = orchestrator.run(self._context("a que se ddia brasper"))
+        self.assertEqual(decision["intent"], "remittance_requirements")
+        self.assertEqual(decision.get("metadata", {}).get("reason"), "brasper_info")
+        self.assertIn("Brasper Transferencias se dedica", result.message)
+        self.assertNotIn("Hola, soy el asistente", result.message)
+
+    def test_brasper_info_can_be_written_by_llm_from_knowledge(self):
+        llm = InfoLLM(None)
+        chat_router = ChatRouterUseCase(self.tool_router, self.policy_engine, llm)
+        orchestrator = ConversationOrchestrator(llm, self.policy_engine, chat_router)
+        result, decision = orchestrator.run(self._context("a que se dedica brasper"))
+        self.assertEqual(decision["intent"], "remittance_requirements")
+        self.assertEqual(decision.get("metadata", {}).get("reason"), "brasper_info")
+        self.assertIn("ayuda a enviar dinero", result.message)
+        self.assertNotIn("Cotización Brasper", result.message)
+
+    def test_hallucinated_llm_quote_is_ignored_without_quote_signal(self):
+        pre = self.policy_engine.pre_process("a que se dedica brasper", {})
+        out = self.policy_engine.post_process(
+            "a que se dedica brasper",
+            {},
+            {
+                "intent": "remittance_quote",
+                "extracted_data": {
+                    "language": "es",
+                    "origin_currency": "BRL",
+                    "destination_currency": "PEN",
+                    "send_amount": 1000,
+                },
+            },
+            pre,
+        )
+        self.assertEqual(out["intent"], "remittance_requirements")
+        self.assertEqual(out["metadata"]["reason"], "brasper_info")
+        self.assertIsNone(out["extracted_data"].get("origin_currency"))
+        self.assertIsNone(out["extracted_data"].get("destination_currency"))
+        self.assertIsNone(out["extracted_data"].get("send_amount"))
 
     def test_direct_quote_without_llm(self):
         orchestrator = ConversationOrchestrator(FakeLLM(None), self.policy_engine, self.chat_router)
@@ -142,10 +202,9 @@ class ChatArchitectureTests(unittest.TestCase):
         self.assertIn("Brasper", result.message)
         self.assertIn("BRL a USD", result.message)
 
-    def test_handoff_skips_quote(self):
+    def test_handoff_does_not_require_saved_contact_context(self):
         orchestrator = ConversationOrchestrator(FakeLLM(None), self.policy_engine, self.chat_router)
         context = self._context("Quiero hablar con un asesor por whatsapp")
-        context.lead_state = {"name": "María", "last": "López", "language": "es"}
         context.summary = {"summary": "Resumen previo"}
         result, decision = orchestrator.run(context)
         self.assertEqual(decision["intent"], "human_handoff")
@@ -159,7 +218,7 @@ class ChatArchitectureTests(unittest.TestCase):
         self.assertEqual(result.type, "contact_prompt")
         self.assertIn("registré tu contacto", result.message)
 
-    def test_email_after_quote_context_stays_in_quote_flow(self):
+    def test_email_after_quote_context_does_not_reuse_previous_quote(self):
         orchestrator = ConversationOrchestrator(FakeLLM("{}"), self.policy_engine, self.chat_router)
         context = ConversationContext(
             user_id="51999999999",
@@ -174,10 +233,10 @@ class ChatArchitectureTests(unittest.TestCase):
             },
         )
         result, decision = orchestrator.run(context)
-        self.assertEqual(decision["intent"], "remittance_quote")
-        self.assertIn("https://wa.me/test", result.message)
+        self.assertEqual(decision["intent"], "collect_contact")
+        self.assertNotIn("https://wa.me/test", result.message)
 
-    def test_new_amount_overrides_previous_context_amount(self):
+    def test_new_amount_does_not_reuse_previous_context_pair(self):
         normalized = self.policy_engine.post_process(
             "quiero recibir 1000 reales a soles",
             {
@@ -224,7 +283,7 @@ class ChatArchitectureTests(unittest.TestCase):
             "No debe inferir nombre y apellido desde copy de marca/cupón",
         )
 
-    def test_bare_amount_updates_existing_send_quote(self):
+    def test_bare_amount_does_not_reuse_existing_send_quote(self):
         normalized = self.policy_engine.post_process(
             "250",
             {
@@ -247,8 +306,17 @@ class ChatArchitectureTests(unittest.TestCase):
             ),
         )
         self.assertEqual(normalized["extracted_data"]["send_amount"], 250.0)
+        self.assertIsNone(normalized["extracted_data"].get("origin_currency"))
+        self.assertIsNone(normalized["extracted_data"].get("destination_currency"))
         self.assertIsNone(normalized["extracted_data"].get("receive_amount"))
         self.assertEqual(normalized["extracted_data"]["quote_mode"], "send")
+
+    def test_incomplete_quote_returns_format_instruction_not_question(self):
+        orchestrator = ConversationOrchestrator(FakeLLM(None), self.policy_engine, self.chat_router)
+        result, decision = orchestrator.run(self._context("Cuánto me sale enviar 500?"))
+        self.assertEqual(decision["intent"], "remittance_quote")
+        self.assertIn("en un solo mensaje", result.message)
+        self.assertNotIn("?", result.message)
 
     def test_inverse_quote_matches_direct_formula(self):
         class TestBrasperUseCase(BrasperUseCase):

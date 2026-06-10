@@ -21,11 +21,6 @@ class ContactFeature:
                 else self.policy_engine.copy(language, "contact_ok")
             )
         lead_updates = dict(data)
-        if handoff_prereq:
-            if not data.get("name") or not data.get("last"):
-                lead_updates["pending_handoff_prereq"] = True
-            else:
-                lead_updates["pending_handoff_prereq"] = False
         return FeatureResult(
             type="contact_prompt",
             message=message,

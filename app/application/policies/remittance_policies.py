@@ -1,11 +1,11 @@
 import os
 import re
+from typing import Optional
 
 
 class RemittancePolicyEngine:
     # Respuestas 100 % deterministas por reglas: aquí no hace falta el LLM (ahorra latencia y coste).
-    # Para cotización, saludo, asesor, contacto, etc. sí se llama al modelo para interpretar el mensaje
-    # y fusionar slots con lo que ya había en sesión.
+    # No se fusionan slots de sesión: cada mensaje debe traer toda la información necesaria.
     _SKIP_LLM_REASONS = frozenset({"coupon_lookup", "supported_pairs", "brasper_info"})
     _CURRENCY_ALIASES = {
         "USD": {"usd", "dolar", "dolares", "dólar", "dólares", "dollar", "dollars", "usdt"},
@@ -49,6 +49,22 @@ class RemittancePolicyEngine:
         "cómo usar",
         "que es brasper",
         "qué es brasper",
+        "a que se dedica brasper",
+        "a qué se dedica brasper",
+        "a que se dedica",
+        "a qué se dedica",
+        "a que se ddia brasper",
+        "a qué se ddia brasper",
+        "a que se ddia",
+        "a qué se ddia",
+        "a que se dedia brasper",
+        "a qué se dedia brasper",
+        "que hace brasper",
+        "qué hace brasper",
+        "que hacen",
+        "qué hacen",
+        "de que trata brasper",
+        "de qué trata brasper",
         "para que sirve",
         "para qué sirve",
         "informacion sobre brasper",
@@ -120,9 +136,10 @@ class RemittancePolicyEngine:
             "es": {
                 "greeting": "Hola, soy el asistente de Brasper. Puedo ayudarte con cotizaciones, comisiones, cupones activos y derivación por WhatsApp.",
                 "fallback": "Puedo ayudarte con cotizaciones Brasper, cupones activos y derivación con un asesor.",
-                "ask_origin": "¿Qué moneda deseas enviar? Por ejemplo PEN, BRL o USD.",
-                "ask_destination": "¿Qué moneda deseas recibir? Por ejemplo BRL, PEN o USD.",
-                "ask_amount": "Indícame cuánto deseas enviar o cuánto deseas recibir para cotizar.",
+                "quote_incomplete": "Para calcular una cotización, escribe en un solo mensaje el monto, la moneda de origen y la moneda de destino. Ejemplo: Cotizar 500 BRL a PEN.",
+                "ask_origin": "Para cotizar necesito que el mensaje incluya la moneda de origen, la moneda de destino y el monto. Ejemplo: Cotizar 500 BRL a PEN.",
+                "ask_destination": "Para cotizar necesito que el mensaje incluya la moneda de origen, la moneda de destino y el monto. Ejemplo: Cotizar 500 BRL a PEN.",
+                "ask_amount": "Para cotizar necesito que el mensaje incluya el monto, la moneda de origen y la moneda de destino. Ejemplo: Cotizar 500 BRL a PEN.",
                 "requirements": "Brasper cotiza corredores BRL a PEN, PEN a BRL, BRL a USD y USD a BRL.",
                 "contact_ok": "Listo, registré tu contacto para continuar con tu consulta.",
                 "need_name": "Para registrarte, compárteme tu nombre y apellido.",
@@ -140,19 +157,20 @@ class RemittancePolicyEngine:
                 "invalid_pair": "Brasper solo opera BRL a PEN, PEN a BRL, BRL a USD y USD a BRL.",
                 "invalid_amount": "Necesito un monto válido mayor a 0 para ayudarte con la cotización.",
                 "brasper_info": (
-                    "Brasper es un servicio de envío de dinero entre monedas (corredores BRL↔PEN y BRL↔USD). "
-                    "En el chat puedes pedir una cotización indicando moneda de origen, de destino y cuánto quieres "
-                    "enviar o recibir; el asistente usa las tasas y comisiones vigentes de la plataforma. "
-                    "También puedes preguntar por cupones activos o pedir que te derivemos por WhatsApp con un asesor. "
-                    "¿Quieres cotizar ahora o necesitas algo más concreto?"
+                    "Brasper Transferencias se dedica a servicios de remesas online, cambio de divisas y "
+                    "transferencias internacionales. Está enfocada en operaciones entre Brasil y Perú, "
+                    "principalmente conversión de reales brasileños (BRL), soles peruanos (PEN) y dólares "
+                    "estadounidenses (USD). Su propuesta es facilitar envíos de dinero y cambios de moneda "
+                    "con rapidez, seguridad, transparencia, tasas competitivas y atención personalizada."
                 ),
             },
             "pt": {
                 "greeting": "Olá, sou o assistente da Brasper. Posso ajudar com cotações, comissões, cupons ativos e atendimento por WhatsApp.",
                 "fallback": "Posso ajudar com cotações da Brasper, cupons ativos e encaminhamento para um assessor.",
-                "ask_origin": "Qual moeda você quer enviar? Por exemplo PEN, BRL ou USD.",
-                "ask_destination": "Qual moeda você quer receber? Por exemplo BRL, PEN ou USD.",
-                "ask_amount": "Informe quanto deseja enviar ou quanto deseja receber para cotar.",
+                "quote_incomplete": "Para calcular uma cotação, envie em uma única mensagem o valor, a moeda de origem e a moeda de destino. Exemplo: Cotar 500 BRL para PEN.",
+                "ask_origin": "Para cotar, a mensagem precisa incluir moeda de origem, moeda de destino e valor. Exemplo: Cotar 500 BRL para PEN.",
+                "ask_destination": "Para cotar, a mensagem precisa incluir moeda de origem, moeda de destino e valor. Exemplo: Cotar 500 BRL para PEN.",
+                "ask_amount": "Para cotar, a mensagem precisa incluir valor, moeda de origem e moeda de destino. Exemplo: Cotar 500 BRL para PEN.",
                 "requirements": "A Brasper cota corredores BRL para PEN, PEN para BRL, BRL para USD e USD para BRL.",
                 "contact_ok": "Pronto, registrei seu contato para continuar com a consulta.",
                 "need_name": "Para registrar, compartilhe seu nome e sobrenome.",
@@ -170,19 +188,20 @@ class RemittancePolicyEngine:
                 "invalid_pair": "A Brasper opera apenas BRL para PEN, PEN para BRL, BRL para USD e USD para BRL.",
                 "invalid_amount": "Preciso de um valor válido maior que 0 para ajudar com a cotação.",
                 "brasper_info": (
-                    "A Brasper é um serviço de envio entre moedas (corredores BRL↔PEN e BRL↔USD). "
-                    "Neste chat você pode pedir uma cotação dizendo a moeda de origem, a de destino e quanto quer "
-                    "enviar ou receber; o assistente usa taxas e comissões vigentes na plataforma. "
-                    "Também dá para perguntar sobre cupons ativos ou pedir encaminhamento por WhatsApp com um assessor. "
-                    "Quer cotar agora ou precisa de mais alguma coisa?"
+                    "A Brasper Transferências atua com remessas online, câmbio de moedas e transferências "
+                    "internacionais. É focada em operações entre Brasil e Peru, principalmente conversão de "
+                    "reais brasileiros (BRL), soles peruanos (PEN) e dólares americanos (USD). A proposta é "
+                    "facilitar envios de dinheiro e câmbio com rapidez, segurança, transparência, taxas "
+                    "competitivas e atendimento personalizado."
                 ),
             },
             "en": {
                 "greeting": "Hello, I am the Brasper assistant. I can help with quotes, commissions, active coupons, and WhatsApp handoff.",
                 "fallback": "I can help with Brasper quotes, active coupons, and advisor handoff.",
-                "ask_origin": "Which currency do you want to send? For example PEN, BRL, or USD.",
-                "ask_destination": "Which currency do you want to receive? For example BRL, PEN, or USD.",
-                "ask_amount": "Tell me how much you want to send or receive so I can quote it.",
+                "quote_incomplete": "To calculate a quote, send the amount, origin currency, and destination currency in one message. Example: Quote 500 BRL to PEN.",
+                "ask_origin": "To quote, the message must include origin currency, destination currency, and amount. Example: Quote 500 BRL to PEN.",
+                "ask_destination": "To quote, the message must include origin currency, destination currency, and amount. Example: Quote 500 BRL to PEN.",
+                "ask_amount": "To quote, the message must include amount, origin currency, and destination currency. Example: Quote 500 BRL to PEN.",
                 "requirements": "Brasper quotes BRL to PEN, PEN to BRL, BRL to USD, and USD to BRL corridors.",
                 "contact_ok": "Done, I registered your contact so we can continue your request.",
                 "need_name": "To register you, please share your first and last name.",
@@ -200,11 +219,11 @@ class RemittancePolicyEngine:
                 "invalid_pair": "Brasper currently supports only BRL to PEN, PEN to BRL, BRL to USD, and USD to BRL.",
                 "invalid_amount": "I need a valid amount greater than 0 to help with the quote.",
                 "brasper_info": (
-                    "Brasper is a money-transfer service between currencies (BRL↔PEN and BRL↔USD corridors). "
-                    "In this chat you can request a quote by stating origin currency, destination currency, and how "
-                    "much you want to send or receive; the assistant uses live rates and fees from the platform. "
-                    "You can also ask about active coupons or request a handoff to an advisor on WhatsApp. "
-                    "Would you like a quote now, or something more specific?"
+                    "Brasper Transfers provides online remittance, currency exchange, and international "
+                    "transfer services. It focuses on operations between Brazil and Peru, mainly Brazilian "
+                    "reals (BRL), Peruvian soles (PEN), and US dollars (USD). Its goal is to make money "
+                    "transfers and currency exchange fast, secure, transparent, competitive, and supported "
+                    "with personalized service."
                 ),
             },
         }
@@ -332,6 +351,8 @@ class RemittancePolicyEngine:
             "canal",
             "tienda",
             "oficial",
+            "brasper",
+            "dedica",
         }
     )
 
@@ -345,6 +366,9 @@ class RemittancePolicyEngine:
         if len(tokens) < 2:
             return None, None
         lower_tokens = [token.lower() for token in tokens]
+        lowered = self._normalize_text(message)
+        if self._is_brasper_informational_query(lowered):
+            return None, None
         if any(token in self._REMITTANCE_HINTS for token in lower_tokens):
             return None, None
         if any(token in self._NAME_STOPWORDS for token in lower_tokens):
@@ -482,17 +506,47 @@ class RemittancePolicyEngine:
         return normalized
 
     def _is_brasper_informational_query(self, lowered: str) -> bool:
-        return any(phrase in lowered for phrase in self._BRASPER_INFO_PHRASES)
+        if any(phrase in lowered for phrase in self._BRASPER_INFO_PHRASES):
+            return True
+        tokens = set(re.findall(r"[a-záéíóúñçãõâêôü]+", lowered))
+        if "brasper" not in tokens:
+            return False
+        return bool(
+            tokens.intersection(
+                {
+                    "que",
+                    "qué",
+                    "como",
+                    "cómo",
+                    "para",
+                    "sirve",
+                    "dedica",
+                    "ddia",
+                    "dedia",
+                    "hace",
+                    "hacen",
+                    "es",
+                    "funciona",
+                    "informacion",
+                    "información",
+                    "trata",
+                }
+            )
+        )
 
-    def _detect_intent(self, message: str, normalized_slots: dict) -> tuple[str | None, str | None]:
+    def _has_quote_signal(self, message: str, normalized_slots: dict) -> bool:
         lowered = self._normalize_text(message)
-        has_quote_signal = (
+        return (
             any(keyword in lowered for keyword in self._REMITTANCE_HINTS)
             or normalized_slots.get("origin_currency")
             or normalized_slots.get("destination_currency")
             or normalized_slots.get("send_amount") is not None
             or normalized_slots.get("receive_amount") is not None
         )
+
+    def _detect_intent(self, message: str, normalized_slots: dict) -> tuple[Optional[str], Optional[str]]:
+        lowered = self._normalize_text(message)
+        has_quote_signal = self._has_quote_signal(message, normalized_slots)
         if any(keyword in lowered for keyword in self._COUPON_KEYWORDS):
             return "remittance_requirements", "coupon_lookup"
         if any(keyword in lowered for keyword in self._HANDOFF_KEYWORDS):
@@ -509,7 +563,7 @@ class RemittancePolicyEngine:
             return "collect_contact", "contact_data"
         return None, None
 
-    def _validation_error(self, normalized_slots: dict) -> str | None:
+    def _validation_error(self, normalized_slots: dict) -> Optional[str]:
         language = normalized_slots.get("language") or "es"
         amount = normalized_slots.get("send_amount")
         receive_amount = normalized_slots.get("receive_amount")
@@ -523,9 +577,8 @@ class RemittancePolicyEngine:
             return self.copy(language, "invalid_pair")
         return None
 
-    def pre_process(self, message: str, lead_state: dict | None = None) -> dict:
-        lead_state = lead_state or {}
-        normalized_slots = self._normalize_slots(lead_state, message)
+    def pre_process(self, message: str, lead_state: Optional[dict] = None) -> dict:
+        normalized_slots = self._normalize_slots({}, message)
         intent, reason = self._detect_intent(message, normalized_slots)
         validation_error = self._validation_error(normalized_slots)
         # CHAT_FORCE_LLM=1 desactiva cualquier salto del LLM (solo cupones/listas/info fija seguirán
@@ -540,14 +593,30 @@ class RemittancePolicyEngine:
             "should_skip_llm": should_skip_llm,
         }
 
-    def post_process(self, message: str, lead_state: dict, llm_extract: dict | None, pre_analysis: dict) -> dict:
+    def post_process(self, message: str, lead_state: dict, llm_extract: Optional[dict], pre_analysis: dict) -> dict:
         llm_extract = llm_extract or {"intent": "", "extracted_data": {}, "answer": ""}
         llm_slots = self._normalize_slots(llm_extract.get("extracted_data", {}), message)
-        merged_slots = self._merge_slots(lead_state, pre_analysis.get("normalized_slots", {}))
+        pre_slots = pre_analysis.get("normalized_slots", {})
+        merged_slots = self._merge_slots({}, pre_slots)
         merged_slots = self._merge_slots(merged_slots, llm_slots)
+        pre_has_quote_signal = self._has_quote_signal(message, pre_slots)
+        if not pre_has_quote_signal:
+            for key in (
+                "origin_currency",
+                "destination_currency",
+                "send_amount",
+                "receive_amount",
+                "quote_mode",
+                "coupon_code",
+            ):
+                merged_slots[key] = None
 
         intent, reason = self._detect_intent(message, merged_slots)
+        if intent == "remittance_quote" and not pre_has_quote_signal:
+            intent, reason = pre_analysis.get("intent"), pre_analysis.get("reason")
         final_intent = intent or llm_extract.get("intent") or pre_analysis.get("intent") or "remittance_requirements"
+        if final_intent == "remittance_quote" and not pre_has_quote_signal:
+            final_intent = pre_analysis.get("intent") or "remittance_requirements"
         if pre_analysis.get("intent") in {"human_handoff", "remittance_requirements"}:
             final_intent = pre_analysis["intent"]
         validation_error = self._validation_error(merged_slots) or pre_analysis.get("validation_error")
