@@ -1,90 +1,101 @@
-# Backend — API FastAPI
+# Cauce · Plataforma IA Multi-Tenant
 
-API **FastAPI** con LLM (DeepSeek/OpenAI-compatible), integración calendario/WhatsApp y herramientas Brasper. El widget web del chat vive en el directorio hermano `../webchat/`.
+Plataforma gestionada por agencia para operar bots de clientes en WhatsApp, Telegram y webchat desde un panel interno. La base funcional ya esta cerrada; este repo queda orientado a produccion.
 
----
+## Ejecutar en desarrollo (un comando)
 
-## Estructura (esta carpeta)
+```bash
+./scripts/dev.sh           # backend :8002 + poller Telegram + panel :3000
+./scripts/dev.sh --audio   # además el microservicio Whisper :8090 (transcripción)
+./scripts/stop.sh          # detiene todo
+```
+
+Requisitos: Postgres corriendo (`brew services start postgresql@16`) y el venv en `.venv/`.
+**Importante:** el bot de Telegram solo responde si el **poller** (`dev_telegram.py`) está
+activo — `dev.sh` lo levanta. Probar: escribe al bot en Telegram, o abre el panel en
+http://localhost:3000 (`owner@agencia.com` / `demo1234`) → Conversaciones → Brasper.
+Logs en `.logs/`.
+
+## Stack
+
+| Capa | Tecnologia |
+|---|---|
+| API | FastAPI + Python |
+| Panel | Next.js + TypeScript |
+| Datos | Postgres en produccion, SQLite solo local/tests |
+| Temporal | Redis |
+| Proxy | Caddy |
+| IA | LangGraph + adapter LLM por tenant |
+| Migraciones | Alembic |
+| Deploy | Docker Compose |
+
+## Estructura
 
 ```text
-backend/
-├── main.py                   # FastAPI y CORS
-├── requirements.txt
-├── .env                      # Credenciales y configuración (no commitear secretos)
-└── app/
-    ├── application/          # Casos de uso (chat, CRM, calendario, lead scoring, Brasper…)
-    ├── domain/               # Contratos (ports) y modelos de dominio
-    └── infrastructure/       # Adaptadores: HTTP, LLM, WhatsApp y herramientas
-        └── adapter/
-            ├── input/        # Controladores FastAPI (`http_controller.py`)
-            └── output/       # Modelos LLM, herramientas e integraciones externas
+backend/              API, auth, tenants, canales, persistencia
+web/                  panel interno Next.js
+maqueta/              maqueta navegable de producto/operacion
+docker-compose.yml    stack local/produccion base
+Caddyfile             rutas del proxy
+PLAN_PLATAFORMA.md    plan de produccion por fases
 ```
 
-Flujo resumido: rutas en `app/infrastructure/adapter/input/http_controller.py`; casos de uso en `application/`; LLM y herramientas en `infrastructure/adapter/output/`.
-
----
-
-## Requisitos
-
-- **Python** 3.10+ (recomendado)
-
----
-
-## Configuración
-
-1. Crea o edita `.env` en **esta carpeta** (`backend/.env`).
-
-Variables habituales:
-
-| Área | Variables |
-|------|-----------|
-| LLM | `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_MAX_OUTPUT_TOKENS`, `DEEPSEEK_LOG_USAGE` |
-| CRM / Zefiron | `ZEFIRON_USERNAME`, `ZEFIRON_PASSWORD` |
-| Debounce (menos llamadas al LLM por ráfagas) | `CHAT_DEBOUNCE_SECONDS` (ej. `2.5`; `0` = desactivado), `CHAT_DEBOUNCE_IMMEDIATE_MIN_WORDS` (ej. `5`: mensajes largos sin esperar) |
-| WhatsApp (webhook) | `VERIFY_TOKEN`, `wp_key` |
-
-El debounce acumula mensajes del mismo usuario y ejecuta **una** pasada al pipeline (LLM + orquestador) tras unos segundos de silencio. En varios workers de uvicorn, cada proceso tiene su propia cola en memoria.
-
-2. Entorno virtual e instalación (desde `backend/`):
+## Ejecutar
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+cp backend/.env.example backend/.env
+# completa credenciales y passwords
+docker compose up --build
 ```
 
-## Ejecutar la API
+Abre:
 
-Desde `backend/` con el venv activado:
+```text
+http://localhost:8080
+```
+
+## Verificar Backend
 
 ```bash
-source .venv/bin/activate
-uvicorn main:app --reload --host 0.0.0.0 --port 8001
+cd backend
+../.venv/bin/python tests/run_checks.py
 ```
 
-- Base URL: `http://localhost:8001`
-- La API no inicia jobs de persistencia de leads. El chat opera sin historial ni registro de leads.
+## Documentos Clave
 
-### Rutas útiles
+- `AGENTS.md`: skills y flujo para agentes (bot / fintech IA).
+- `PLAN_PLATAFORMA.md`: ruta de produccion.
+- `backend/DEPLOY.md`: deploy y variables obligatorias.
+- `backend/README.md`: API y endpoints.
+- `web/README.md`: panel.
 
-| Método | Ruta | Uso |
-|--------|------|-----|
-| POST | `/consulta-chat` | Chat genérico (`user_id`, `message_user`) |
-| POST | `/consulta-webchat` | Body JSON `{ "message": "..." }` — usado por el widget |
-| POST | `/save-lead` | Pruebas de lead |
-| POST | `/create-date` | Crear cita |
-| GET | `/dates` | Listar citas |
-| GET/POST | `/webhook` | Verificación y mensajes WhatsApp Cloud API |
+## Skills (Cursor / agentes)
 
----
+En `.agents/skills/` y `.cursor/skills/`:
 
-## Widget web
+| Skill | Uso |
+|---|---|
+| `brasper-ia-audit` | Auditoria pre-launch / dual stack |
+| `brasper-fintech-ia` | Cotizaciones, tools, anti-alucinacion, RAG |
+| `brainstorming` | Features nuevas |
+| `thermo-nuclear-code-quality-review` | Review estricto de graph/orchestrators |
 
-El cliente embebible está en **`../webchat/`** (`npm install`, `npm run dev`, variable `VITE_CHAT_API_URL` apuntando a `http://localhost:8001/consulta-webchat`). Detalle de build y opciones del widget: ver ese directorio.
+## Mejoras para launch (fases)
 
----
+| Fase | Doc |
+|---|---|
+| **0** Unificar Brasper en `backend/` (CRITICAL) | [docs/plans/FASE-0.md](docs/plans/FASE-0.md) |
+| 1 Vertical Remesas + anti-alucinacion | [docs/plans/FASE-1.md](docs/plans/FASE-1.md) |
+| 2 CI + evals + smoke | [docs/plans/FASE-2.md](docs/plans/FASE-2.md) |
+| 3 FAQ / RAG ligero | [docs/plans/FASE-3.md](docs/plans/FASE-3.md) |
+| 4 Launch ops | [docs/plans/FASE-4.md](docs/plans/FASE-4.md) |
 
-## Notas
+Indice: [`docs/plans/00-ROADMAP.md`](docs/plans/00-ROADMAP.md) · Prompts: [`docs/PROMPT-FASES.md`](docs/PROMPT-FASES.md) · Mapa: [`FEATURE_MAP.md`](FEATURE_MAP.md)
 
-- Ejecuta `uvicorn` con **directorio de trabajo** en `backend/` para que `load_dotenv()` encuentre `.env` de forma fiable.
-- No subas `credentials.json`, `.env` ni claves reales al repositorio.
+Empezar por Fase 0: el Docker actual no usa el motor de cotizaciones real de `app/`.
+
+## Estado Honesto
+
+Ya existen base multi-tenant, panel, auth, uso, WhatsApp, Telegram, Postgres/Redis en Compose, worker, Alembic, Admin API de tenants, panel de administracion de clientes, LangGraph, ToolRouter, citas, debounce Redis, logs/metricas/alertas, backup/restore, rotacion de secret refs y hardening inicial.
+
+Todavia faltan para produccion completa: worker para audios/transcripcion y validaciones de negocio por vertical.
