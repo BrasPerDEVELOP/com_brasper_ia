@@ -1,0 +1,15 @@
+.git
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+.env
+backend/.env
+backend/data
+backend/backups
+web/node_modules
+web/.next
+web/.env*
+node_modules
+.DS_Store

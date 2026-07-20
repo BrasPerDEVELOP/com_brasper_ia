@@ -7,6 +7,8 @@ __pycache__/
 
 
 venv/
+node_modules/
+.next/
 credentials.json
 token.json
 
@@ -23,3 +25,12 @@ debug_bundle_linux-x64_assets.stamp
 flutter_assets.d
 .ninja_log
 
+backend/data/
+backend/backups/
+.logs/
+
+# Tooling local de asistentes de IA (no se versiona)
+.claude/
+.cursor/
+.agents/
+.kombai/

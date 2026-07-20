@@ -1,0 +1,35 @@
+# ============================================================================
+# docker-compose.prod.yml — override de PRODUCCIÓN
+#
+# Uso:
+#   1) Define el dominio (una sola vez) en el .env de la raíz o exporta la var:
+#        SITE_ADDRESS=panel.tu-dominio.com
+#   2) Apunta el DNS (A/AAAA) de ese dominio a la IP del servidor.
+#   3) Levanta:
+#        docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Caddy saca y renueva el certificado HTTPS solo (Let's Encrypt) usando 80/443.
+# El panel y la API quedan en el MISMO dominio, así que el web usa rutas
+# relativas (NEXT_PUBLIC_API_BASE vacío) y no hay CORS.
+# ============================================================================
+services:
+  reverse-proxy:
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_ADDRESS: "${SITE_ADDRESS:?Define SITE_ADDRESS, ej: panel.tu-dominio.com}"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+
+  admin-web:
+    build:
+      args:
+        NEXT_PUBLIC_API_BASE: ""
+    environment:
+      NEXT_PUBLIC_API_BASE: ""
+
+volumes:
+  caddy-data:
+  caddy-config:

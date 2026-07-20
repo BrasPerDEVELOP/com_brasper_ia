@@ -1,0 +1,25 @@
+# SITE_ADDRESS controla el modo:
+#   - sin definir  -> :8080 (HTTP local, desarrollo)
+#   - "panel.tu-dominio.com" -> HTTPS automático (Let's Encrypt) en producción
+# Se define al levantar producción con docker-compose.prod.yml.
+{$SITE_ADDRESS::8080} {
+	handle /health {
+		reverse_proxy api:8002
+	}
+
+	handle /webhook* {
+		reverse_proxy api:8002
+	}
+
+	handle /telegram/webhook/* {
+		reverse_proxy api:8002
+	}
+
+	handle /api/* {
+		reverse_proxy api:8002
+	}
+
+	handle {
+		reverse_proxy admin-web:3000
+	}
+}
