@@ -1,0 +1,17 @@
+# ============================================================================
+# docker-compose.server.yml — override para el SERVER de Brasper (vmi3028414)
+#
+# El server usa NGINX (no Caddy) como front y certbot para TLS. Aquí el backend
+# corre detrás de nginx: publica la API SOLO en loopback (127.0.0.1:8596) y nginx
+# (site com_brasper_ia -> ia.finzeler.com) hace proxy_pass a ese puerto.
+#
+# NO se levanta Caddy (reverse-proxy) ni se tocan 80/443 (los ocupa nginx).
+#
+# Uso (solo estos servicios; sin caddy, sin admin-web, sin whisper):
+#   docker compose -f docker-compose.yml -f docker-compose.server.yml \
+#     up -d --build postgres redis api worker
+# ============================================================================
+services:
+  api:
+    ports:
+      - "127.0.0.1:8596:8002"
