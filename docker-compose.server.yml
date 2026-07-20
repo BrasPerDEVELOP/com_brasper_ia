@@ -22,3 +22,8 @@ services:
     restart: unless-stopped
   redis:
     restart: unless-stopped
+  # Panel Next.js (web/) — nginx enruta ia.finzeler.com/ -> aquí, /api -> api.
+  admin-web:
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
