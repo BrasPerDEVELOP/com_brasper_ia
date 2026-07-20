@@ -21,7 +21,10 @@ from typing import Any, Optional
 
 from . import brasper_api, policies
 
-_RECEIVE_KEYWORDS = ("recibir", "receive", "receber", "reciba", "receba")
+_RECEIVE_KEYWORDS = ("recibir", "receive", "receber", "reciba", "receba", "llegue", "lleguen", "llegar", "cheguem", "chegar")
+# Países -> moneda ("enviar a Brasil", "recibir en Perú"). El texto se normaliza
+# sin tildes, por eso las claves van sin acento.
+_COUNTRY_CURRENCY = {"peru": "PEN", "brasil": "BRL", "brazil": "BRL"}
 # Señales FUERTES: pedidos de cotización inequívocos -> ruta cotizador aunque
 # falten datos (se le piden). Señales DÉBILES: verbos comunes (enviar, cambio…)
 # que solo cuentan si vienen acompañados de monto o moneda — así "¿qué documentos
@@ -134,11 +137,53 @@ def has_intent(tenant: dict, text: str) -> bool:
     return bool(currencies and amount is not None) or len(currencies) >= 2
 
 
+def _ordered_currencies(text: str) -> list[str]:
+    """Monedas por palabra (soles/reales/…) MÁS países mapeados a su moneda
+    (Perú→PEN, Brasil→BRL), en orden de aparición y sin duplicados."""
+    low = policies._normalize_text(text)
+    pos_by_code: dict[str, int] = {}
+
+    def note(code: str, pos: int) -> None:
+        if pos >= 0 and (code not in pos_by_code or pos < pos_by_code[code]):
+            pos_by_code[code] = pos
+
+    for code in policies.extract_currencies(text):
+        aliases = policies._CURRENCY_ALIASES.get(code, ())
+        found = [low.find(a) for a in aliases if a in low]
+        note(code, min(found) if found else 0)
+    for name, code in _COUNTRY_CURRENCY.items():
+        note(code, low.find(name))
+    return [code for code, _ in sorted(pos_by_code.items(), key=lambda kv: kv[1])]
+
+
+def _infer_pair(tenant: dict, origin: Optional[str],
+                destination: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Completa el lado faltante si el corredor es ÚNICO en los pares del tenant.
+    Ej. Brasper: origen PEN ⇒ destino BRL; recibir PEN ⇒ origen BRL."""
+    prs = pairs(tenant)
+    if not prs:
+        return origin, destination
+    if origin and not destination:
+        cands = {b for a, b in prs if a == origin}
+        if len(cands) == 1:
+            destination = next(iter(cands))
+    elif destination and not origin:
+        cands = {a for a, b in prs if b == destination}
+        if len(cands) == 1:
+            origin = next(iter(cands))
+    return origin, destination
+
+
 def extract_request(tenant: dict, text: str) -> dict:
-    """Extrae origen/destino/monto/modo del mensaje (reglas del bot real)."""
+    """Extrae origen/destino/monto/modo del mensaje (reglas del bot real).
+
+    Entiende monedas explícitas Y países ("a Brasil", "en Perú"), e infiere el
+    lado faltante cuando el corredor es único (ej. recibir soles ⇒ enviar reales),
+    para no depender de que el usuario escriba el formato exacto "Cotizar X a Y".
+    """
     low = policies._normalize_text(text)
     mode = "receive" if any(k in low for k in _RECEIVE_KEYWORDS) else "send"
-    currencies = policies.extract_currencies(text)
+    currencies = _ordered_currencies(text)
     amount = policies.extract_amount(text)
 
     origin = destination = None
@@ -153,6 +198,9 @@ def extract_request(tenant: dict, text: str) -> dict:
             destination = currencies[0]
         else:
             origin = currencies[0]
+
+    # Inferir el lado faltante por el corredor (no depende del formato exacto).
+    origin, destination = _infer_pair(tenant, origin, destination)
 
     missing = []
     if origin is None:
@@ -305,3 +353,45 @@ def _tc_validity_minutes(tenant: dict) -> int:
 
 def incomplete_reply(language: str = "es") -> str:
     return _copy(language)["incomplete"]
+
+
+def clarify_reply(tenant: dict, request: dict, language: str = "es") -> str:
+    """Pregunta concreta cuando el pedido de cotización viene incompleto.
+
+    Nunca decimos que 'no tenemos el tipo de cambio' (las tasas son deterministas):
+    pedimos SOLO el dato que falta, con las opciones reales del corredor.
+    """
+    origin = request.get("origin")
+    destination = request.get("destination")
+    amount = request.get("amount")
+    mode = request.get("mode", "send")
+    prs = pairs(tenant)
+    names = {
+        "es": {"PEN": "soles (PEN)", "BRL": "reales (BRL)", "USD": "dólares (USD)"},
+        "pt": {"PEN": "soles (PEN)", "BRL": "reais (BRL)", "USD": "dólares (USD)"},
+    }
+    nm = names.get(language, names["es"])
+
+    def listed(codes: list[str]) -> str:
+        return " o ".join(nm.get(c, c) for c in codes)
+
+    if language in ("es", "pt"):
+        if origin and not destination:
+            opts = sorted({b for a, b in prs if a == origin})
+            if opts:
+                q = "¿A qué moneda quieres que llegue el dinero" if language == "es" \
+                    else "Para qual moeda o dinheiro deve chegar"
+                return f"{q}: {listed(opts)}?"
+        if destination and not origin:
+            opts = sorted({a for a, b in prs if b == destination})
+            if opts:
+                q = "¿Desde qué moneda vas a enviar" if language == "es" \
+                    else "De qual moeda você vai enviar"
+                return f"{q}: {listed(opts)}?"
+        if amount is None and (origin or destination):
+            if language == "es":
+                verbo = "recibir" if mode == "receive" else "enviar"
+                return f"¿Qué monto quieres {verbo}? Por ejemplo: 500."
+            verbo = "receber" if mode == "receive" else "enviar"
+            return f"Qual valor você quer {verbo}? Por exemplo: 500."
+    return incomplete_reply(language)

@@ -243,9 +243,15 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
     tenant = state["tenant"]
     request = quotes.extract_request(tenant, state["text"])
     if request["missing"]:
-        observability.event("quote.deferred_to_llm", tenant_id=tenant["id"],
+        # Pedido de cotización incompleto: en vez de delegar al LLM (que podía
+        # decir "no tengo el tipo de cambio"), respondemos una aclaración concreta
+        # y determinista, pidiendo SOLO el dato faltante con opciones del corredor.
+        language = state.get("analysis", {}).get("language", "es")
+        reply = quotes.clarify_reply(tenant, request, language)
+        db.add_message(tenant["id"], state["cid"], "assistant", reply)
+        observability.event("quote.clarify", tenant_id=tenant["id"],
                             conversation_id=state["cid"], missing=request["missing"])
-        return {"quote_pending": True}  # -> build_messages -> call_llm
+        return {"response": reply, "handoff": False, "usage": None}
     quote = quotes.compute(tenant, request["origin"], request["destination"],
                            request["amount"], request["mode"])
     language = state.get("analysis", {}).get("language", "es")
