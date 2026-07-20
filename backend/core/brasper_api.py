@@ -156,18 +156,50 @@ def _integration_request(tenant: dict, method: str, path: str, **kwargs) -> dict
         return {"ok": False, "error": str(exc)[:160]}
 
 
+_DOC_TYPES = {"dni", "ce", "cpf", "cnpj", "ruc", "passport", "other"}
+
+
 def upsert_client(tenant: dict, lead: dict) -> dict:
-    """Crea o actualiza un cliente. Nunca crea una transacción."""
-    payload = {
-        "names": lead.get("nombres"),
-        "lastnames": lead.get("apellidos"),
-        "document_type": lead.get("tipo_documento"),
-        "document_number": lead.get("numero_documento"),
-        "phone": lead.get("telefono"),
-        "code_phone": lead.get("codigo_telefono") or "+51",
-        "email": lead.get("correo"),
+    """Crea (o reusa por email) el cliente en Brasper como usuario role='client'.
+
+    La API de Brasper es abierta (sin JWT) y expone `POST /user/` en
+    multipart/form-data. No crea transacciones. Si el email ya existe, reusa ese
+    usuario en vez de duplicar. Devuelve {'ok', 'data': {'id', 'created'}}.
+    """
+    base = _base_url(tenant)
+    email = (lead.get("correo") or "").strip()
+    doc_type = str(lead.get("tipo_documento") or "").strip().lower()
+    if doc_type not in _DOC_TYPES:
+        doc_type = "other"
+    phone_digits = "".join(ch for ch in str(lead.get("telefono") or "") if ch.isdigit())
+    fields = {
+        "names": (lead.get("nombres") or "").strip(),
+        "lastnames": (lead.get("apellidos") or "").strip(),
+        "document_type": doc_type,
+        "document_number": (lead.get("numero_documento") or "").strip(),
+        "code_phone": (lead.get("codigo_telefono") or "+51").strip(),
+        "role": "client",
+        "is_agent": "false",
     }
-    return _integration_request(tenant, "POST", "/brasper/ai/clients/upsert", json=payload)
+    if phone_digits:
+        fields["phone"] = phone_digits
+    if email:
+        fields["email"] = email
+    # multipart/form-data: cada campo como parte sin filename (idioma httpx).
+    files = [(k, (None, str(v))) for k, v in fields.items()]
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            if email:
+                g = client.get(f"{base}/user/email/{email}", headers={"accept": "application/json"})
+                if g.status_code == 200 and (g.json() or {}).get("id"):
+                    return {"ok": True, "data": {"id": g.json()["id"], "created": False}}
+            r = client.post(f"{base}/user/", files=files)
+            r.raise_for_status()
+            data = r.json()
+            return {"ok": True, "data": {"id": data.get("id"), "created": True}}
+    except (httpx.HTTPError, ValueError) as exc:
+        observability.event("brasper_api.user_upsert_error", error=str(exc)[:200])
+        return {"ok": False, "error": str(exc)[:200]}
 
 
 def deposit_accounts(tenant: dict, currency: str) -> dict:
