@@ -128,6 +128,38 @@ async def chat(tenant_id: str, body: ChatIn, request: Request,
         raise HTTPException(status_code=502, detail=str(e))
 
 
+# ---------- compat: webchat del IA anterior (ia.finzeler.com/consulta-webchat) ----------
+# Reemplaza al bot mono-tenant previo SIN romper el frontend (com_brasper_www).
+# Endpoint PUBLICO (sin auth), tenant fijo via WEBCHAT_TENANT (por defecto "brasper").
+# Contrato idéntico al viejo: body {message, session_id?} + ?conversation_id
+# -> {"response", "conversation_id"}.
+class WebChatIn(BaseModel):
+    message: str
+    session_id: str | None = None
+
+
+@router.post("/consulta-webchat")
+async def consulta_webchat(body: WebChatIn, request: Request,
+                           conversation_id: str | None = Query(None)):
+    rate_limit.check(request, "chat", limit=60)
+    if not body.message.strip():
+        raise HTTPException(status_code=422, detail="Mensaje vacío")
+    session_id = (conversation_id or body.session_id or "webchat").strip() or "webchat"
+    tenant = _tenant_or_404(os.getenv("WEBCHAT_TENANT", "brasper"))
+    try:
+        out = await engine.handle_message(tenant, f"webchat:{session_id}", body.message.strip(),
+                                          channel="webchat", conversation_id=session_id)
+        response = out.get("response") or ""
+        banner = out.get("banner")
+        if banner and banner.get("text"):
+            response = banner["text"] + "\n\n" + response
+        return {"response": response, "conversation_id": session_id}
+    except engine.ConversationBusyError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except engine.llm.LLMError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 # ---------- webhook WhatsApp (multi-tenant por phone_number_id) ----------
 @router.get("/webhook")
 def webhook_verify(mode: str = Query(None, alias="hub.mode"),
