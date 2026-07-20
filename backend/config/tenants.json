@@ -1,0 +1,125 @@
+{
+  "pricing_usd_per_million": {
+    "deepseek-chat": { "in": 0.27, "out": 1.1 },
+    "gpt-4o-mini": { "in": 0.15, "out": 0.6 },
+    "default": { "in": 0.5, "out": 1.5 }
+  },
+  "tenants": {
+    "brasper": {
+      "name": "Brasper",
+      "vertical": "Remesas / Fintech",
+      "active": true,
+      "fee_usd": 900,
+      "languages": ["es", "pt", "en"],
+      "llm": {
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "temperature": 0.7,
+        "max_tokens": 500
+      },
+      "system_prompt": "Eres el asistente de Brasper, empresa de remesas Perú↔Brasil. Ayudas a cotizar envíos, explicar requisitos (documento de identidad y datos del destinatario) y promociones. No inventes tasas exactas: si piden cotización, da un estimado referencial. IMPORTANTE — cómo se atiende: la atención es 100% por este mismo chat; un asesor humano continúa la conversación AQUÍ MISMO. NUNCA derives al usuario a WhatsApp, a otro número ni a otra red social, ni ofrezcas 'pasarlo con un asesor por WhatsApp'. Cuando el usuario quiera realizar el envío, proceder o pagar, indícale que escriba 'continuar' o que envíe su comprobante, y que un asesor lo atenderá aquí mismo para completar el envío. Detecta el idioma del usuario (es/pt/en) y responde SIEMPRE en ese idioma. Sé breve y cordial.",
+      "handoff": {
+        "number": "51987654321",
+        "keywords": ["asesor", "humano", "persona real", "atendente", "advisor", "hablar con alguien", "falar com alguém"],
+        "message": "Con gusto 🤝 En un momento un asesor continúa por aquí contigo para ayudarte con tu envío."
+      },
+      "quote": {
+        "enabled": true,
+        "api": {
+          "enabled": true,
+          "base_url": "https://apibras.finzeler.com",
+          "integration_secret_env": "BRASPER_IA_SHARED_SECRET"
+        },
+        "pairs": [["PEN", "BRL"], ["BRL", "PEN"], ["USD", "BRL"], ["BRL", "USD"]],
+        "rates": { "PEN->BRL": 1.46, "BRL->PEN": 0.66, "USD->BRL": 5.4, "BRL->USD": 0.18 },
+        "commission_ranges": [
+          { "min": 0, "max": 500, "rate": 0.03 },
+          { "min": 500.01, "max": 5000, "rate": 0.02 },
+          { "min": 5000.01, "max": 999999, "rate": 0.015 }
+        ],
+        "coupon": { "code": "BRASPER10", "discount_percentage": 10 },
+        "tc_validity_minutes": 20,
+        "high_amount_threshold": 5000
+      },
+      "onboarding": {
+        "first_send_banner": {
+          "enabled": true,
+          "image_url": null,
+          "text": "🎉 ¡Bienvenido a Brasper Transferencias! En tu *primer envío* te acompañamos paso a paso. Para cotizar gratis escribe, por ejemplo: *Cotizar 500 PEN a BRL* 🇵🇪↔🇧🇷"
+        }
+      },
+      "externalApis": {
+        "erp_demo": {
+          "name": "ERP demo (httpbin)",
+          "base_url": "https://httpbin.org",
+          "auth": { "type": "none" },
+          "default_headers": { "Accept": "application/json" },
+          "endpoints": [
+            { "tool": "consultar_stock", "method": "GET", "path": "/get?sku={{sku}}", "desc": "Consulta el stock disponible por SKU", "output_var": "stock" },
+            { "tool": "crear_pedido", "method": "POST", "path": "/post", "desc": "Crea un pedido; envia cliente e items en el body JSON", "output_var": "pedido" },
+            { "tool": "estado_envio", "method": "GET", "path": "/anything/envios/{{tracking}}", "desc": "Consulta el estado de un envio por codigo de tracking" }
+          ]
+        }
+      },
+      "templates": [
+        { "name": "recordatorio_cita", "category": "UTILITY", "language": "es", "status": "APPROVED", "body": "Hola {{1}}, te recordamos tu cita el {{2}} a las {{3}}." },
+        { "name": "confirmacion_operacion", "category": "UTILITY", "language": "es", "status": "APPROVED", "body": "Hola {{1}}, tu operacion por {{2}} fue confirmada. Codigo: {{3}}." },
+        { "name": "codigo_otp", "category": "AUTHENTICATION", "language": "es", "status": "APPROVED", "body": "Tu codigo de verificacion es {{1}}. No lo compartas con nadie." }
+      ],
+      "whatsapp": {
+        "phone_number_id_env": "WA_PHONE_NUMBER_ID_BRASPER",
+        "token_env": "wp_key"
+      },
+      "telegram": {
+        "bot_token_env": "TELEGRAM_TOKEN_BRASPER",
+        "secret_token_env": "TELEGRAM_SECRET_BRASPER"
+      },
+      "audio": {
+        "enabled": true,
+        "provider": "whisper_service",
+        "service_url": "http://localhost:8090",
+        "language": "es",
+        "context": "Remesas Perú-Brasil. Monedas: soles (PEN), reales (BRL), dólares (USD). Métodos de pago: Yape, Pix, transferencia bancaria. Marca: Brasper."
+      }
+    },
+    "clinica_demo": {
+      "name": "Clínica Vida (demo)",
+      "vertical": "Salud",
+      "active": true,
+      "fee_usd": 400,
+      "languages": ["es"],
+      "llm": {
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "temperature": 0.5,
+        "max_tokens": 400
+      },
+      "system_prompt": "Eres el asistente de Clínica Vida. Ayudas a pacientes a informarse sobre especialidades (medicina general, pediatría, ginecología, odontología), horarios (L-S 8:00-20:00) y a solicitar citas. Para agendar pide: nombre completo, DNI y especialidad. Si describe una urgencia, recomienda acudir a emergencias de inmediato. Responde en español, breve y empático.",
+      "calendar": {
+        "enabled": true,
+        "timezone": "America/Lima",
+        "specialties": ["medicina general", "pediatría", "ginecología", "odontología"]
+      },
+      "handoff": {
+        "number": "51999555111",
+        "keywords": ["asesor", "humano", "recepción", "hablar con alguien", "urgente"],
+        "message": "Te comunico con recepción 🏥 Escríbenos directo: https://wa.me/{number}"
+      },
+      "whatsapp": {
+        "phone_number_id_env": "WA_PHONE_NUMBER_ID_CLINICA",
+        "token_env": "WA_TOKEN_CLINICA"
+      },
+      "telegram": {
+        "bot_token_env": "TELEGRAM_TOKEN_CLINICA",
+        "secret_token_env": "TELEGRAM_SECRET_CLINICA",
+        "handoff_buttons": [
+          { "text": "Escribir a recepción", "url": "https://wa.me/51999555111" }
+        ]
+      }
+    }
+  }
+}
