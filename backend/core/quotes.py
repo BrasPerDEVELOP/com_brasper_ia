@@ -25,6 +25,9 @@ _RECEIVE_KEYWORDS = ("recibir", "receive", "receber", "reciba", "receba", "llegu
 # Países -> moneda ("enviar a Brasil", "recibir en Perú"). El texto se normaliza
 # sin tildes, por eso las claves van sin acento.
 _COUNTRY_CURRENCY = {"peru": "PEN", "brasil": "BRL", "brazil": "BRL"}
+# Verbos que indican dirección de ENVÍO (para distinguir un pedido con dirección
+# nueva de un seguimiento tipo "¿y para 2000 soles?").
+_SEND_KEYWORDS = ("enviar", "envio", "mandar", "mando", "manda", "mandes", "envie", "enviaria", "desde")
 # Señales FUERTES: pedidos de cotización inequívocos -> ruta cotizador aunque
 # falten datos (se le piden). Señales DÉBILES: verbos comunes (enviar, cambio…)
 # que solo cuentan si vienen acompañados de monto o moneda — así "¿qué documentos
@@ -174,18 +177,36 @@ def _infer_pair(tenant: dict, origin: Optional[str],
     return origin, destination
 
 
-def extract_request(tenant: dict, text: str) -> dict:
+def extract_request(tenant: dict, text: str, prev: Optional[dict] = None) -> dict:
     """Extrae origen/destino/monto/modo del mensaje (reglas del bot real).
 
     Entiende monedas explícitas Y países ("a Brasil", "en Perú"), e infiere el
-    lado faltante cuando el corredor es único (ej. recibir soles ⇒ enviar reales),
-    para no depender de que el usuario escriba el formato exacto "Cotizar X a Y".
+    lado faltante cuando el corredor es único (ej. recibir soles ⇒ enviar reales).
+
+    `prev` = última cotización de la conversación ({origin, destination, mode}).
+    Si el mensaje NO indica una dirección nueva (p.ej. "¿y para 2000 soles?"),
+    se CONTINÚA la misma línea (mismo modo y corredor), solo cambia el monto —
+    así no se resetea a "enviar" cuando el cliente venía en modo "recibir".
     """
     low = policies._normalize_text(text)
-    mode = "receive" if any(k in low for k in _RECEIVE_KEYWORDS) else "send"
     currencies = _ordered_currencies(text)
     amount = policies.extract_amount(text)
 
+    has_receive = any(k in low for k in _RECEIVE_KEYWORDS)
+    has_send = any(k in low for k in _SEND_KEYWORDS)
+    has_country = any(name in low for name in _COUNTRY_CURRENCY)
+    explicit_direction = has_receive or has_send or has_country or len(currencies) >= 2
+
+    # Seguimiento: sin dirección nueva + hay cotización previa -> misma línea.
+    if not explicit_direction and prev and prev.get("origin") and prev.get("destination"):
+        return {
+            "origin": prev["origin"], "destination": prev["destination"],
+            "amount": amount, "mode": prev.get("mode") or "send",
+            "missing": [] if amount is not None else ["amount"],
+            "followup": True,
+        }
+
+    mode = "receive" if has_receive else "send"
     origin = destination = None
     if len(currencies) >= 2:
         # "recibir 500 BRL de PEN" -> destino=BRL (primera), origen=PEN (segunda)

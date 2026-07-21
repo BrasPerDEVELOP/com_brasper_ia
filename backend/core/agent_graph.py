@@ -241,7 +241,15 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
     delega al LLM para que lo interprete y guíe con naturalidad.
     """
     tenant = state["tenant"]
-    request = quotes.extract_request(tenant, state["text"])
+    # Contexto de la última cotización (para "continuar la misma línea" cuando el
+    # siguiente mensaje solo cambia el monto, p.ej. "¿y para 2000 soles?").
+    _lead = db.get_lead_data(tenant["id"], state["cid"])
+    _prev = None
+    _ruta = str(_lead.get("ruta") or "")
+    if "->" in _ruta:
+        _o, _d = _ruta.split("->", 1)
+        _prev = {"origin": _o.strip(), "destination": _d.strip(), "mode": _lead.get("modo")}
+    request = quotes.extract_request(tenant, state["text"], prev=_prev)
     if request["missing"]:
         # Pedido de cotización incompleto: en vez de delegar al LLM (que podía
         # decir "no tengo el tipo de cambio"), respondemos una aclaración concreta
