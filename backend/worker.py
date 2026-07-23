@@ -13,7 +13,6 @@ from core import alerts, auth, audio_adapter, db, debounce, engine, jobs, tenant
 def init() -> None:
     db.assert_production_infra()   # fail-fast: en produccion exige Postgres + Redis
     db.init_db()
-    tenants.ensure_store()
     auth.ensure_schema()
 
 

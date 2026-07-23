@@ -37,7 +37,6 @@ def _mask(token: str) -> str:
 
 def cmd_init(_args) -> None:
     db.init_db()
-    T.ensure_store()
     auth.ensure_schema()
     auth.ensure_seed()
     print("[init] esquema creado y seed aplicado.")
@@ -88,7 +87,6 @@ def cmd_list_users(_args) -> None:
 
 
 def cmd_list_tenants(_args) -> None:
-    T.ensure_store()
     tenants = T.all_tenants(include_inactive=True)
     if not tenants:
         print("  (sin tenants)")

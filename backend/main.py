@@ -48,7 +48,6 @@ app.add_middleware(CORSMiddleware, **_cors_kwargs)
 
 db.assert_production_infra()   # fail-fast: en produccion exige Postgres + Redis
 db.init_db()
-tenants.ensure_store()
 auth.ensure_schema()
 auth.ensure_seed()
 app.include_router(router)
