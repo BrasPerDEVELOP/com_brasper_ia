@@ -241,9 +241,7 @@ def pick_advisor() -> dict | None:
     advisors = list_advisors()
     if not advisors:
         return None
-    from core import tenants as T
-    config = T.get_config()
-    load = db.handoff_load_by_agent(config["id"])
+    load = db.handoff_load_by_agent()
     return min(advisors, key=lambda u: (load.get(u["email"], 0), u["id"]))
 
 
@@ -255,9 +253,7 @@ def derive_to_advisor(conversation_id: str) -> str | None:
     advisor = pick_advisor()
     if advisor:
         try:
-            from core import tenants as T
-            config = T.get_config()
-            db.assign_conversation(config["id"], conversation_id, advisor["email"])
+            db.assign_conversation(conversation_id, advisor["email"])
         except Exception:  # noqa: BLE001 - asignación best-effort, no rompe el flujo
             return None
         return advisor["email"]

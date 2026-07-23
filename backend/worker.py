@@ -21,7 +21,6 @@ def handle(job: dict) -> None:
     payload = job.get("payload") or {}
     if job_type == "audit.event":
         db.add_audit_event(
-            payload.get("tenant_id"),
             payload.get("actor"),
             payload.get("action", "worker.audit"),
             payload.get("resource"),
@@ -30,7 +29,6 @@ def handle(job: dict) -> None:
         return
     if job_type == "tenant.changed":
         db.add_audit_event(
-            payload.get("tenant_id"),
             payload.get("actor"),
             "worker.tenant_changed",
             f"tenant:{payload.get('tenant_id')}",
@@ -48,7 +46,7 @@ def handle(job: dict) -> None:
 
 
 async def transcribe_audio_job(payload: dict) -> None:
-    tenant = tenants.get_tenant(payload["tenant_id"])
+    tenant = tenants.get_config()
     if not tenant:
         print(f"[worker] tenant inactivo/no encontrado: {payload.get('tenant_id')}")
         return
@@ -60,7 +58,7 @@ async def transcribe_audio_job(payload: dict) -> None:
 
 
 async def handle_channel_message(payload: dict) -> None:
-    tenant = tenants.get_tenant(payload["tenant_id"])
+    tenant = tenants.get_config()
     if not tenant:
         print(f"[worker] tenant inactivo/no encontrado: {payload.get('tenant_id')}")
         return

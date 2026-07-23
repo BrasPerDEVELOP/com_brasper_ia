@@ -121,8 +121,8 @@ def rate_for(origin: str, destination: str) -> Optional[float]:
     tenant = T.get_config()
     # Un tenant conectado a Brasper usa exclusivamente su API. Si la API falla o
     # no publica el corredor, no se cotiza con un valor local potencialmente viejo.
-    if brasper_api.enabled():
-        return brasper_api.rate_for(origin, destination)
+    if brasper_api.enabled(tenant):
+        return brasper_api.rate_for(tenant, origin, destination)
     raw = (_cfg().get("rates") or {}).get(f"{origin}->{destination}")
     try:
         rate = float(raw)
@@ -338,9 +338,9 @@ def compute(origin: str, destination: str,
     ranges = cfg.get("commission_ranges") or []
     coupon = cfg.get("coupon") or None
     # Con API activa tampoco se usan comisiones o cupones locales.
-    if brasper_api.enabled():
-        ranges = brasper_api.commission_ranges(origin, destination)
-        coupon = brasper_api.best_coupon(origin, destination)
+    if brasper_api.enabled(tenant):
+        ranges = brasper_api.commission_ranges(tenant, origin, destination)
+        coupon = brasper_api.best_coupon(tenant, origin, destination)
     fn = _quote_inverse if mode == "receive" else _quote_from_gross_send
     quote = fn(amount, rate, ranges, coupon)
     quote.update({"origin_currency": origin, "destination_currency": destination, "mode": mode})

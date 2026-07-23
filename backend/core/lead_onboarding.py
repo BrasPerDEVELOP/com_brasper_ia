@@ -94,7 +94,7 @@ def recognize_by_phone(channel: str, user_ref: str) -> dict:
     detected = phone_from_channel(channel, user_ref)
     if not detected:
         return {"ok": True, "found": False}
-    result = brasper_api.find_client(phone=detected[1], code_phone=detected[0])
+    result = brasper_api.find_client(tenant, phone=detected[1], code_phone=detected[0])
     if not result.get("ok"):
         return {"ok": False, "found": False}
     client = result.get("data")
@@ -235,7 +235,7 @@ def process(cid: str, text: str, channel: str, user_ref: str,
 
     if stage == "full_name":
         full_name = f"{lead.get('nombres') or ''} {lead.get('apellidos') or ''}".strip()
-        found = brasper_api.find_client(full_name=full_name)
+        found = brasper_api.find_client(tenant, full_name=full_name)
         if found.get("ok") and found.get("data"):
             lead = db.merge_lead_data(cid, _client_updates(found["data"]))
             name = str(lead.get("nombres") or "").split()[0]
@@ -258,7 +258,7 @@ def process(cid: str, text: str, channel: str, user_ref: str,
     if next_stage != "sync":
         return {"response": _next_prompt(next_stage), "handoff": False, "usage": None}
 
-    result = brasper_api.upsert_client(lead)
+    result = brasper_api.upsert_client(tenant, lead)
     if not result.get("ok"):
         db.merge_lead_data(cid, {"commercial_stage": "sync_error"})
         return {
@@ -301,7 +301,7 @@ def deposit_accounts_reply(lead: dict) -> tuple[str, list[dict]]:
     currency = route.split("->", 1)[0].upper() if "->" in route else ""
     if not currency:
         return "Primero necesito una cotización para saber en qué moneda realizarás el depósito.", []
-    result = brasper_api.deposit_accounts(currency)
+    result = brasper_api.deposit_accounts(tenant, currency)
     accounts = result.get("data") if result.get("ok") else []
     if not accounts:
         return ("¡Perfecto! 😊 Un asesor se comunicará contigo en unos instantes "

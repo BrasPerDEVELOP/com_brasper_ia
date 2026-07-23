@@ -319,7 +319,7 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
                         destination=request["destination"], mode=request["mode"], high_amount=high)
     if high:
         db.set_conversation_status(cid, "handoff")
-        assigned = auth.derive_to_advisor(tid, cid)
+        assigned = auth.derive_to_advisor(cid)
         observability.event("conversation.handoff", conversation_id=cid,
                             reason="high_amount", assigned_to=assigned)
         return {"response": final, "handoff": True, "usage": None}

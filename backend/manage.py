@@ -95,7 +95,7 @@ def cmd_list_tenants(_args) -> None:
     source = "database" if T.database_tenants_enabled() else "config/tenants.json"
     print(f"  fuente: {source}")
     for tid in tenants:
-        t = T.get_tenant(tid, include_inactive=True)
+        t = T.get_config() if tid == "brasper" else None
         if not t:
             print(f"  {tid:16} (inactivo)")
             continue

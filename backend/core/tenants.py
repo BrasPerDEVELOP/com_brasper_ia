@@ -30,6 +30,86 @@ def get_config() -> dict:
 def reload_config() -> None:
     get_config.cache_clear()
 
+
+def database_tenants_enabled() -> bool:
+    """La configuración de producto es single-tenant y vive en JSON.
+
+    Se conserva este helper para scripts operativos que muestran la fuente.
+    """
+    return False
+
+
+def _require_brasper(tenant_id: str) -> str:
+    normalized = (tenant_id or "").strip().lower()
+    if normalized != "brasper":
+        raise KeyError(normalized or tenant_id)
+    return normalized
+
+
+def _deep_merge(target: dict, patch: dict) -> dict:
+    for key, value in (patch or {}).items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge(target[key], value)
+        else:
+            target[key] = copy.deepcopy(value)
+    return target
+
+
+def _save_brasper(config: dict) -> dict:
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        data = json.load(f)
+    data.setdefault("tenants", {})["brasper"] = {
+        key: value for key, value in copy.deepcopy(config).items() if key != "id"
+    }
+    tmp_path = CONFIG_PATH.with_suffix(".json.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp_path, CONFIG_PATH)
+    reload_config()
+    return get_config()
+
+
+def upsert_tenant_config(tenant_id: str, config: dict) -> dict:
+    _require_brasper(tenant_id)
+    return _save_brasper(_deep_merge(get_config(), config))
+
+
+def set_tenant_active(tenant_id: str, active: bool) -> dict:
+    _require_brasper(tenant_id)
+    return _save_brasper(_deep_merge(get_config(), {"active": bool(active)}))
+
+
+_SECRET_REF_PATHS = {
+    "llm.api_key_env",
+    "whatsapp.token_env",
+    "whatsapp.phone_number_id_env",
+    "telegram.bot_token_env",
+    "telegram.secret_token_env",
+}
+
+
+def set_secret_refs(tenant_id: str, refs: dict[str, str]) -> dict:
+    _require_brasper(tenant_id)
+    cfg = copy.deepcopy(get_config())
+    for path, env_name in (refs or {}).items():
+        if path not in _SECRET_REF_PATHS:
+            raise ValueError(f"Ruta de secreto no permitida: {path}")
+        if not env_name or not env_name.replace("_", "").isalnum():
+            raise ValueError(f"Nombre de variable inválido para {path}")
+        node = cfg
+        parts = path.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = env_name
+    return _save_brasper(cfg)
+
+
+def resolve_by_phone_number_id(phone_number_id: str) -> dict | None:
+    cfg = get_config()
+    expected = whatsapp_phone_number_id(cfg)
+    return cfg if expected and str(expected) == str(phone_number_id) else None
+
 def resolve_secret(cfg: dict, key: str, env_key: str) -> str | None:
     if cfg.get(key):
         return cfg[key]

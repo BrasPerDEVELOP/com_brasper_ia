@@ -2,6 +2,7 @@
 import asyncio
 import hmac
 import json
+import logging
 import os
 from typing import Any
 
@@ -13,6 +14,7 @@ from core import db, engine, whatsapp, connectors, wa_templates, auth, telegram,
 from core import tenants as T
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 _PLAIN_SECRET_KEYS = {"api_key", "token", "bot_token", "secret_token"}
 
 
@@ -376,7 +378,7 @@ def admin_tenants_patch(body: TenantPatchIn,
     tenant = T.get_config()
 
     db.add_audit_event(
-        tenant.get("id", "brasper"), user.get("email"), "tenant.patch", f"tenant:brasper",
+        user.get("email"), "tenant.patch", "tenant:brasper",
         {"keys": sorted(body.config.keys())},
     )
     _enqueue_tenant_changed(tenant.get("id", "brasper"), user.get("email"), "tenant.patch")
@@ -495,7 +497,7 @@ class AssignIn(BaseModel):
 def advisors_list(user: dict = Depends(auth.require("conversations:read"))):
     tenant = T.get_config()
     tenant_id = tenant["id"]
-    return {"advisors": [auth._public_user(u) for u in auth.list_advisors(tenant_id)],
+    return {"advisors": [auth._public_user(u) for u in auth.list_advisors()],
             "load": db.handoff_load_by_agent()}
 
 
@@ -848,8 +850,28 @@ async def telegram_webhook(request: Request, tenant_id: str | None = None):
     ):
         return {"ok": True, "queued": True}
     # Telegram reintenta si tardamos: respondemos 200 rápido y procesamos aparte.
-    asyncio.create_task(telegram.process_update(body))
+    # La tarea captura y registra excepciones; un create_task desnudo ocultaba los
+    # fallos que dejaron mensajes recibidos sin respuesta.
+    asyncio.create_task(_process_telegram_update_safely(body))
     return {"ok": True}
+
+
+async def _process_telegram_update_safely(body: dict) -> None:
+    try:
+        await telegram.process_update(body)
+    except Exception as exc:  # noqa: BLE001 - frontera de tarea en background
+        parsed = telegram.parse_update(body) or {}
+        logger.exception(
+            "telegram.process_update failed chat_id=%s update_id=%s",
+            parsed.get("chat_id"),
+            body.get("update_id"),
+        )
+        observability.event(
+            "telegram.update_failed",
+            chat_id=parsed.get("chat_id"),
+            update_id=body.get("update_id"),
+            error=type(exc).__name__,
+        )
 
 
 # ---------- admin de Telegram por tenant ----------
@@ -868,7 +890,7 @@ async def telegram_set_webhook(body: TgWebhookIn,
 
 @router.post("/api/telegram/delete-webhook")
 async def telegram_delete_webhook(user: dict = Depends(auth.require("config:write"))):
-    return await telegram.delete_webhook(T.get_config())
+    return await telegram.delete_webhook()
 
 
 @router.get("/api/telegram/info")

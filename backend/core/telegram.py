@@ -185,7 +185,7 @@ async def process_update(body: dict) -> dict:
         media = msg["media"]
         # Voz/audio: si hay transcripción configurada y el bot no está en pausa,
         # transcribimos y lo tratamos como texto (el bot responde). Si no, handoff.
-        if media["kind"] in ("voice", "audio") and audio_adapter.enabled():
+        if media["kind"] in ("voice", "audio") and audio_adapter.enabled(tenant):
             cid = db.get_or_create_conversation(f"tg:{chat_id}", "telegram")
             if db.conversation_status(cid) != "handoff":
                 return await _handle_incoming_audio(chat_id, msg, cid)
@@ -270,7 +270,9 @@ async def _handle_incoming_audio(chat_id, msg: dict, cid: str) -> dict:
     content, ctype = await download_file(media["ref"])
     if not content:
         return await _handle_incoming_media(chat_id, msg)
-    tr = await audio_adapter.transcribe_bytes(content, media.get("mime") or ctype or "audio/ogg")
+    tr = await audio_adapter.transcribe_bytes(
+        tenant, content, media.get("mime") or ctype or "audio/ogg"
+    )
     text = (tr.get("text") or "").strip()
     if not tr.get("ok") or not text:
         observability.event("audio.transcription_failed", tenant_id=tenant["id"],

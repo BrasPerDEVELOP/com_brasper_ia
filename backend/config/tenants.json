@@ -51,19 +51,7 @@
           "text": "🎉 ¡Bienvenido a Brasper Transferencias! En tu *primer envío* te acompañamos paso a paso. Para cotizar gratis escribe, por ejemplo: *Cotizar 500 PEN a BRL* 🇵🇪↔🇧🇷"
         }
       },
-      "externalApis": {
-        "erp_demo": {
-          "name": "ERP demo (httpbin)",
-          "base_url": "https://httpbin.org",
-          "auth": { "type": "none" },
-          "default_headers": { "Accept": "application/json" },
-          "endpoints": [
-            { "tool": "consultar_stock", "method": "GET", "path": "/get?sku={{sku}}", "desc": "Consulta el stock disponible por SKU", "output_var": "stock" },
-            { "tool": "crear_pedido", "method": "POST", "path": "/post", "desc": "Crea un pedido; envia cliente e items en el body JSON", "output_var": "pedido" },
-            { "tool": "estado_envio", "method": "GET", "path": "/anything/envios/{{tracking}}", "desc": "Consulta el estado de un envio por codigo de tracking" }
-          ]
-        }
-      },
+      "externalApis": {},
       "templates": [
         { "name": "recordatorio_cita", "category": "UTILITY", "language": "es", "status": "APPROVED", "body": "Hola {{1}}, te recordamos tu cita el {{2}} a las {{3}}." },
         { "name": "confirmacion_operacion", "category": "UTILITY", "language": "es", "status": "APPROVED", "body": "Hola {{1}}, tu operacion por {{2}} fue confirmada. Codigo: {{3}}." },
