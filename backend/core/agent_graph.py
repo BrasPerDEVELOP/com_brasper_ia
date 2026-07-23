@@ -192,7 +192,7 @@ def handle_onboarding(state: AgentState) -> dict[str, Any]:
     if (result.get("handoff") and
             db.conversation_status(state["cid"]) != "handoff"):
         db.set_conversation_status(state["cid"], "handoff")
-        auth.derive_to_advisor(tenant["id"], state["cid"])
+        auth.derive_to_advisor(state["cid"])
     return result
 
 
@@ -216,7 +216,7 @@ def _complete_deposit_accounts(cid: str, *,
         })
         return {"response": reply, "handoff": False, "usage": None}
     db.set_conversation_status(cid, "handoff")
-    assigned = auth.derive_to_advisor(tenant["id"], cid)
+    assigned = auth.derive_to_advisor(cid)
     observability.event("conversation.handoff", conversation_id=cid,
                         reason="deposit_accounts_unavailable", assigned_to=assigned)
     return {"response": reply, "handoff": True, "usage": None}
@@ -240,7 +240,7 @@ def handoff(state: AgentState) -> dict[str, Any]:
     db.add_message(state["cid"], "assistant", reply)
     db.set_conversation_status(state["cid"], "handoff")
     # Derivación: asigna la conversación al asesor con menos carga (si hay).
-    assigned = auth.derive_to_advisor(tenant["id"], state["cid"])
+    assigned = auth.derive_to_advisor(state["cid"])
     observability.event("conversation.handoff", conversation_id=state["cid"],
                         reason="checkout" if checkout else "keyword", assigned_to=assigned)
     return {"response": reply, "handoff": True, "usage": None}
@@ -533,4 +533,3 @@ async def handle_message(user_ref: str, text: str,
         "new_lead": state.get("new_lead", False),
         "banner": state.get("banner"),
     }
-

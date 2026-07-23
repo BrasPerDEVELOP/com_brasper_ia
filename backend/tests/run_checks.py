@@ -301,7 +301,7 @@ def case_telegram_secret_in_production():
     from fastapi.testclient import TestClient
     from main import app
 
-    async def _fake_process_update(tenant, body):
+    async def _fake_process_update(body):
         return {"handled": True}
 
     old_pu = telegram.process_update  # se restaura en finally: no filtrar el mock a otros casos
@@ -322,6 +322,12 @@ def case_telegram_secret_in_production():
         r = client.post("/telegram/webhook/brasper", json=raw,
                         headers={"X-Telegram-Bot-Api-Secret-Token": "tg-secret"})
         assert r.status_code == 200, f"con header correcto debe ser 200, fue {r.status_code}"
+        r = client.post("/telegram/webhook", json=raw,
+                        headers={"X-Telegram-Bot-Api-Secret-Token": "tg-secret"})
+        assert r.status_code == 200, f"ruta single-tenant debe aceptar webhook, fue {r.status_code}"
+        r = client.post("/telegram/webhook/otro", json=raw,
+                        headers={"X-Telegram-Bot-Api-Secret-Token": "tg-secret"})
+        assert r.status_code == 404, f"tenant desconocido debe rechazarse, fue {r.status_code}"
     finally:
         telegram.process_update = old_pu
         if old_env is None:

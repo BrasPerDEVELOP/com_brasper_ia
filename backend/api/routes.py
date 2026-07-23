@@ -199,7 +199,7 @@ async def _handle_whatsapp_media(tenant: dict, msg: dict, user_ref: str) -> dict
     if db.conversation_status(cid) != "handoff":
         # Comprobante/adjunto -> lo revisa un humano: pausa el bot y asigna asesor.
         db.set_conversation_status(cid, "handoff")
-        auth.derive_to_advisor(tenant["id"], cid)
+        auth.derive_to_advisor(cid)
         ack = ("Recibí tu comprobante 📎. Un asesor lo revisará y te contactará "
                "para completar tu envío.")
         db.add_message(cid, "assistant", ack)
@@ -818,11 +818,16 @@ async def templates_send(body: TemplateSendIn,
     )
 
 
-# ---------- webhook Telegram (multi-tenant por URL /telegram/webhook/{tenant_id}) ----------
+# ---------- webhook Telegram ----------
+# Conservamos la URL histórica con tenant porque los webhooks ya registrados en
+# Telegram apuntan allí. La ruta sin tenant es la forma canónica single-tenant.
 @router.post("/telegram/webhook")
-async def telegram_webhook(request: Request):
+@router.post("/telegram/webhook/{tenant_id}")
+async def telegram_webhook(request: Request, tenant_id: str | None = None):
     rate_limit.check(request, "telegram_webhook", limit=240)
     tenant = T.get_config()
+    if tenant_id is not None and tenant_id != tenant["id"]:
+        raise HTTPException(status_code=404, detail="Tenant no encontrado")
     secret = T.telegram_secret(tenant)
     if _is_production() and not secret:
         raise HTTPException(status_code=503, detail="Telegram secret token no configurado")

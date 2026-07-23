@@ -66,9 +66,8 @@ def _extract_var(text: str, name: str, endpoint: dict) -> str | None:
 
 def select_tool(text: str) -> dict | None:
     tenant = T.get_config()
-    tenant_id = tenant["id"]
     best: tuple[int, dict, dict] | None = None
-    for connector in connectors.list_connectors():
+    for connector in connectors.list_connectors(tenant):
         for endpoint in connector.get("endpoints", []):
             score = _endpoint_score(text, endpoint)
             if score <= 0:
@@ -107,8 +106,6 @@ def result_reply(request: dict, result: dict) -> str:
 
 
 def persist_tool_result(conversation_id: str, request: dict, result: dict) -> None:
-    tenant = T.get_config()
-    tenant_id = tenant["id"]
     db.add_audit_event(
         actor="agent",
         action="tool.execute",

@@ -108,6 +108,7 @@ def connect():
 _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT 'brasper',
   channel TEXT NOT NULL DEFAULT 'webchat',
   user_ref TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active',
@@ -121,6 +122,7 @@ CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at DESC);
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   conversation_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL DEFAULT 'brasper',
   role TEXT NOT NULL,
   content TEXT NOT NULL,
   media_json TEXT,
@@ -130,6 +132,7 @@ CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id, id);
 
 CREATE TABLE IF NOT EXISTS usage_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id TEXT NOT NULL DEFAULT 'brasper',
   conversation_id TEXT,
   provider TEXT,
   model TEXT,
@@ -142,6 +145,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_events(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS audit_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id TEXT DEFAULT 'brasper',
   actor TEXT,
   action TEXT NOT NULL,
   resource TEXT,
@@ -221,6 +225,7 @@ CREATE TABLE IF NOT EXISTS quotes (
 _POSTGRES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT 'brasper',
   channel TEXT NOT NULL DEFAULT 'webchat',
   user_ref TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active',
@@ -234,6 +239,7 @@ CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at DESC);
 CREATE TABLE IF NOT EXISTS messages (
   id BIGSERIAL PRIMARY KEY,
   conversation_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL DEFAULT 'brasper',
   role TEXT NOT NULL,
   content TEXT NOT NULL,
   media_json TEXT,
@@ -243,6 +249,7 @@ CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id, id);
 
 CREATE TABLE IF NOT EXISTS usage_events (
   id BIGSERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT 'brasper',
   conversation_id TEXT,
   provider TEXT,
   model TEXT,
@@ -255,6 +262,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_events(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS audit_events (
   id BIGSERIAL PRIMARY KEY,
+  tenant_id TEXT DEFAULT 'brasper',
   actor TEXT,
   action TEXT NOT NULL,
   resource TEXT,
@@ -388,8 +396,10 @@ def get_or_create_conversation(user_ref: str, channel: str,
             return row["id"]
         cid = conversation_id or uuid.uuid4().hex[:12]
         con.execute(
-            "INSERT INTO conversations (id, channel, user_ref, started_at, updated_at) "
-            "VALUES (?,?,?,?,?)", (cid, channel, user_ref, _now(), _now()))
+            "INSERT INTO conversations "
+            "(id, tenant_id, channel, user_ref, started_at, updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (cid, "brasper", channel, user_ref, _now(), _now()))
         return cid
 
 
@@ -398,8 +408,10 @@ def add_message(conversation_id: str, role: str, content: str,
     media_json = json.dumps(media, ensure_ascii=False) if media else None
     with connect() as con:
         con.execute(
-            "INSERT INTO messages (conversation_id, role, content, media_json, created_at) "
-            "VALUES (?,?,?,?,?)", (conversation_id, role, content, media_json, _now()))
+            "INSERT INTO messages "
+            "(conversation_id, tenant_id, role, content, media_json, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (conversation_id, "brasper", role, content, media_json, _now()))
         con.execute(
             "UPDATE conversations SET updated_at=? WHERE id=?",
             (_now(), conversation_id))
@@ -539,9 +551,11 @@ def add_usage(conversation_id: str | None, provider: str, model: str,
               tokens_in: int, tokens_out: int, cost_usd: float) -> None:
     with connect() as con:
         con.execute(
-            "INSERT INTO usage_events (conversation_id, provider, model, tokens_in, "
-            "tokens_out, cost_usd, created_at) VALUES (?,?,?,?,?,?,?)",
-            (conversation_id, provider, model, tokens_in, tokens_out, cost_usd, _now()))
+            "INSERT INTO usage_events "
+            "(tenant_id, conversation_id, provider, model, tokens_in, "
+            "tokens_out, cost_usd, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("brasper", conversation_id, provider, model, tokens_in, tokens_out,
+             cost_usd, _now()))
 
 
 def _usage_row(row: Any) -> dict:
@@ -583,9 +597,10 @@ def add_audit_event(actor: str | None,
         metadata = json.dumps(metadata, ensure_ascii=False)
     with connect() as con:
         con.execute(
-            "INSERT INTO audit_events (actor, action, resource, metadata, created_at) "
-            "VALUES (?,?,?,?,?)",
-            (actor, action, resource, metadata, _now()))
+            "INSERT INTO audit_events "
+            "(tenant_id, actor, action, resource, metadata, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("brasper", actor, action, resource, metadata, _now()))
 
 
 def create_appointment(conversation_id: str | None, user_ref: str | None,

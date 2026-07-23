@@ -326,7 +326,7 @@ async def get_webhook_info() -> dict:
 
 async def set_webhook(base_url: str) -> dict:
     tenant = T.get_config()
-    url = base_url.rstrip("/") + f"/telegram/webhook/{tenant['id']}"
+    url = base_url.rstrip("/") + "/telegram/webhook"
     payload: dict = {"url": url, "allowed_updates": ["message"], "drop_pending_updates": True}
     secret = T.telegram_secret(tenant)
     if secret:
