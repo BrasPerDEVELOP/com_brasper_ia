@@ -820,7 +820,7 @@ def case_incoming_media():
         parsed = telegram.parse_update(photo)
         assert parsed["media"]["kind"] == "image" and parsed["media"]["ref"] == "BIGFILEID", parsed
         assert parsed["text"] == "mi comprobante"
-        r = _run(telegram.process_update(tenant, photo))
+        r = _run(telegram.process_update(photo))
         assert r["handled"] and r.get("media") == "image", r
         cid = db.get_or_create_conversation("brasper", "tg:42", "telegram")
         media_msgs = [m for m in db.get_messages("brasper", cid) if m.get("media")]
@@ -1196,7 +1196,7 @@ def case_telegram_audio_transcription():
     try:
         voice = {"message": {"chat": {"id": 7788, "type": "private"}, "from": {"id": 7788},
                              "voice": {"file_id": "VOICEID", "mime_type": "audio/ogg"}}}
-        r = _run(telegram.process_update(tenant, voice))
+        r = _run(telegram.process_update(voice))
         assert r.get("transcribed") is True, r
         cid = db.get_or_create_conversation("brasper", "tg:7788", "telegram")
         msgs = db.get_messages("brasper", cid)
@@ -1211,7 +1211,7 @@ def case_telegram_audio_transcription():
         audio_adapter.transcribe_bytes = _fail_transcribe
         voice2 = {"message": {"chat": {"id": 7799, "type": "private"}, "from": {"id": 7799},
                               "voice": {"file_id": "VOICEID2", "mime_type": "audio/ogg"}}}
-        r2 = _run(telegram.process_update(tenant, voice2))
+        r2 = _run(telegram.process_update(voice2))
         assert r2.get("media") == "voice" and not r2.get("transcribed"), r2
         cid2 = db.get_or_create_conversation("brasper", "tg:7799", "telegram")
         assert db.conversation_status("brasper", cid2) == "handoff", "audio no transcrito -> asesor"

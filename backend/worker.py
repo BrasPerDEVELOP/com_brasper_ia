@@ -73,11 +73,11 @@ async def handle_channel_message(payload: dict) -> None:
         conversation_id=payload.get("conversation_id"),
     )
     if channel == "whatsapp":
-        await whatsapp.send_text(tenant, payload["to"], out["response"])
+        await whatsapp.send_text(payload["to"], out["response"])
         return
     if channel == "telegram":
-        markup = telegram.build_handoff_markup(tenant) if out.get("handoff") else None
-        await telegram.send_message(tenant, payload["chat_id"], out["response"], reply_markup=markup)
+        markup = telegram.build_handoff_markup() if out.get("handoff") else None
+        await telegram.send_message(payload["chat_id"], out["response"], reply_markup=markup)
         return
     print(f"[worker] canal sin envio automatico: {channel}")
 

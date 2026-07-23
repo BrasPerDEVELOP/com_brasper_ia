@@ -115,7 +115,6 @@ def missing_reply(missing: list[str]) -> str:
 
 def schedule(tenant: dict, conversation_id: str, user_ref: str, fields: dict) -> dict:
     return db.create_appointment(
-        tenant["id"],
         conversation_id,
         user_ref,
         fields["patient_name"],

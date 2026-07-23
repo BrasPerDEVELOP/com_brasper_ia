@@ -30,11 +30,11 @@ async def main() -> None:
 
     print("Tenants con Telegram:", ", ".join(t["id"] for t in configured))
     for t in configured:
-        me = await telegram.get_me(t)
+        me = await telegram.get_me()
         who = (me.get("result") or {}).get("username") if me.get("ok") else me.get("reason")
         print(f"  · {t['id']}: @{who}")
 
-    tasks = [asyncio.create_task(telegram.poll_loop(t)) for t in configured]
+    tasks = [asyncio.create_task(telegram.poll_loop()) for t in configured]
     try:
         await asyncio.gather(*tasks)
     except (KeyboardInterrupt, asyncio.CancelledError):

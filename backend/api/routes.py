@@ -171,7 +171,7 @@ async def _handle_whatsapp_audio(tenant: dict, msg: dict, user_ref: str) -> dict
     if not tr.get("ok") or not (tr.get("text") or "").strip():
         return {**base, "sent": False, "reason": f"audio no transcrito: {tr.get('error')}"}
     out = await engine.handle_message(tenant, user_ref, tr["text"].strip(), channel="whatsapp")
-    send = await whatsapp.send_text(tenant, msg["from"], out["response"])
+    send = await whatsapp.send_text(msg["from"], out["response"])
     return {**base, "transcribed": True, "sent": send.get("sent", False)}
 
 
@@ -183,7 +183,7 @@ async def _handle_whatsapp_media(tenant: dict, msg: dict, user_ref: str) -> dict
     """Media entrante de WhatsApp: se guarda como mensaje del usuario (visible en el
     panel) y la conversación pasa a manos de un asesor (el bot no procesa archivos)."""
     kind = msg["type"]
-    cid = db.get_or_create_conversation(tenant["id"], user_ref, "whatsapp")
+    cid = db.get_or_create_conversation(user_ref, "whatsapp")
     name = msg.get("filename") or ""
     caption = (msg.get("caption") or "").strip()
     label = _WA_MEDIA_LABEL.get(kind, "📎 Adjunto")
@@ -192,18 +192,18 @@ async def _handle_whatsapp_media(tenant: dict, msg: dict, user_ref: str) -> dict
         text += f" — {caption}"
     media = {"provider": "whatsapp", "kind": kind, "ref": msg.get("media_id"),
              "mime": msg.get("mime_type"), "name": name or None, "caption": caption}
-    db.add_message(tenant["id"], cid, "user", text, media=media)
-    db.merge_lead_data(tenant["id"], cid, {"commercial_stage": "proof_received"})
+    db.add_message(cid, "user", text, media=media)
+    db.merge_lead_data(cid, {"commercial_stage": "proof_received"})
     observability.event("message.media_received", tenant_id=tenant["id"], conversation_id=cid, kind=kind)
     sent = False
-    if db.conversation_status(tenant["id"], cid) != "handoff":
+    if db.conversation_status(cid) != "handoff":
         # Comprobante/adjunto -> lo revisa un humano: pausa el bot y asigna asesor.
-        db.set_conversation_status(tenant["id"], cid, "handoff")
+        db.set_conversation_status(cid, "handoff")
         auth.derive_to_advisor(tenant["id"], cid)
         ack = ("Recibí tu comprobante 📎. Un asesor lo revisará y te contactará "
                "para completar tu envío.")
-        db.add_message(tenant["id"], cid, "assistant", ack)
-        r = await whatsapp.send_text(tenant, msg["from"], ack)
+        db.add_message(cid, "assistant", ack)
+        r = await whatsapp.send_text(msg["from"], ack)
         sent = r.get("sent", False)
         observability.event("conversation.handoff", tenant_id=tenant["id"],
                             conversation_id=cid, reason="media")
@@ -255,37 +255,29 @@ async def webhook_receive(request: Request):
         banner = out.get("banner")
         if banner:
             if banner.get("image_url"):
-                await whatsapp.send_image(tenant, msg["from"], banner["image_url"], banner.get("text") or "")
+                await whatsapp.send_image(msg["from"], banner["image_url"], banner.get("text") or "")
             elif banner.get("text"):
-                await whatsapp.send_text(tenant, msg["from"], banner["text"])
+                await whatsapp.send_text(msg["from"], banner["text"])
             if out.get("conversation_id"):
-                db.add_message(tenant["id"], out["conversation_id"], "assistant",
+                db.add_message(out["conversation_id"], "assistant",
                                banner.get("text") or "🎁 Banner primer envío")
         if out.get("paused") or not (out.get("response") or "").strip():
             # Un asesor humano atiende esta conversación: el bot no responde.
             results.append({"tenant": tenant["id"], "from": msg["from"],
                             "resolved": True, "sent": False, "paused": True})
-            continue
-        send = await whatsapp.send_text(tenant, msg["from"], out["response"])
-        results.append({"tenant": tenant["id"], "from": msg["from"],
-                        "resolved": True, "sent": send.get("sent", False)})
-    return {"received": len(results), "results": results}
-
-
 # ---------- panel de agencia ----------
 @router.get("/api/tenants")
 def tenants_overview(user: dict = Depends(auth.require("tenants:read"))):
-    """Clientes con consumo/costo REAL (desde usage_events) + fee + margen."""
-    usage = {u["tenant_id"]: u for u in db.usage_summary()}
+    summary = db.usage_summary()
+    u = summary[0] if summary else {}
     out = []
     t = T.get_config()
     if t:
-        tid = t["id"]
-        u = usage.get(tid, {})
+        tid = t.get("id", "brasper")
         cost = round(u.get("cost_usd") or 0, 6)
         fee = t.get("fee_usd", 0)
         out.append({
-            "id": tid, "name": t["name"], "vertical": t.get("vertical", ""),
+            "id": tid, "name": t.get("name", "Brasper"), "vertical": t.get("vertical", ""),
             "fee_usd": fee, "cost_usd": cost, "margin_usd": round(fee - cost, 6),
             "llm_model": t.get("llm", {}).get("model"),
             "llm_key_configured": bool(T.llm_api_key(t)),
@@ -345,7 +337,7 @@ def admin_tenants_create(body: TenantCreateIn,
     _reject_plain_secrets(body.config)
     tenant = _write_tenant_or_error(T.upsert_tenant_config, body.id, body.config)
     db.add_audit_event(
-        tenant["id"], user.get("email"), "tenant.upsert", f"tenant:{tenant['id']}",
+        user.get("email"), "tenant.upsert", f"tenant:{tenant['id']}",
         {"keys": sorted(body.config.keys())},
     )
     _enqueue_tenant_changed(tenant["id"], user.get("email"), "tenant.upsert")
@@ -394,7 +386,7 @@ def admin_tenants_patch(body: TenantPatchIn,
 @router.post("/api/admin/tenants/pause")
 def admin_tenants_pause(user: dict = Depends(auth.require("tenants:write"))):
     tenant = _write_tenant_or_error(T.set_tenant_active, T.get_config()["id"], False)
-    db.add_audit_event(tenant["id"], user.get("email"), "tenant.pause", f"tenant:{tenant['id']}")
+    db.add_audit_event(user.get("email"), "tenant.pause", f"tenant:{tenant['id']}")
     _enqueue_tenant_changed(tenant["id"], user.get("email"), "tenant.pause")
     return {"tenant": tenant}
 
@@ -402,7 +394,7 @@ def admin_tenants_pause(user: dict = Depends(auth.require("tenants:write"))):
 @router.post("/api/admin/tenants/resume")
 def admin_tenants_resume(user: dict = Depends(auth.require("tenants:write"))):
     tenant = _write_tenant_or_error(T.set_tenant_active, T.get_config()["id"], True)
-    db.add_audit_event(tenant["id"], user.get("email"), "tenant.resume", f"tenant:{tenant['id']}")
+    db.add_audit_event(user.get("email"), "tenant.resume", f"tenant:{tenant['id']}")
     _enqueue_tenant_changed(tenant["id"], user.get("email"), "tenant.resume")
     return {"tenant": tenant}
 
@@ -412,9 +404,9 @@ def admin_tenants_secret_refs(body: TenantSecretRefsIn,
                               user: dict = Depends(auth.require("tenants:write"))):
     tenant = _write_tenant_or_error(T.set_secret_refs, T.get_config()["id"], body.refs)
     for path, env_name in body.refs.items():
-        db.add_secret_rotation(tenant["id"], user.get("email"), path, env_name, body.note)
+        db.add_secret_rotation(user.get("email"), path, env_name, body.note)
     db.add_audit_event(
-        tenant["id"], user.get("email"), "tenant.secret_refs", f"tenant:{tenant['id']}",
+        user.get("email"), "tenant.secret_refs", f"tenant:{tenant['id']}",
         {"refs": sorted(body.refs.keys())},
     )
     _enqueue_tenant_changed(tenant["id"], user.get("email"), "tenant.secret_refs")
@@ -425,15 +417,15 @@ def admin_tenants_secret_refs(body: TenantSecretRefsIn,
 def admin_tenants_secret_rotations(limit: int = 100,
                                    user: dict = Depends(auth.require("config:read"))):
     tenant = T.get_config()
-    return {"rotations": db.list_secret_rotations(tenant["id"], limit)}
+    return {"rotations": db.list_secret_rotations(limit)}
 
 
 @router.get("/api/admin/tenants/usage")
 def admin_tenants_usage(limit: int = 100,
                         user: dict = Depends(auth.require("usage:read"))):
     tenant = T.get_config()
-    return {"summary": db.usage_summary(tenant["id"]),
-            "events": db.usage_events(tenant["id"], limit)}
+    return {"summary": db.usage_summary(),
+            "events": db.usage_events(limit)}
 
 
 def _is_agent(user: dict) -> bool:
@@ -455,9 +447,9 @@ def conversations(user: dict = Depends(auth.require("conversations:read"))):
     tenant_id = tenant["id"]
     if _is_agent(user):
         # El asesor ve sus conversaciones + las libres (cola por reclamar), no las de otros.
-        convs = db.list_conversations(tenant_id, assigned_to=user.get("email"), include_unassigned=True)
+        convs = db.list_conversations(assigned_to=user.get("email"), include_unassigned=True)
     else:
-        convs = db.list_conversations(tenant_id)
+        convs = db.list_conversations()
     return {"conversations": convs}
 
 
@@ -466,11 +458,11 @@ def conversation_messages(conversation_id: str,
                           user: dict = Depends(auth.require("conversations:read"))):
     tenant = T.get_config()
     tenant_id = tenant["id"]
-    conv = db.get_conversation(tenant_id, conversation_id)
+    conv = db.get_conversation(conversation_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada para este tenant")
     _assert_conversation_access(user, conv)
-    msgs = db.get_messages(tenant_id, conversation_id)
+    msgs = db.get_messages(conversation_id)
     # Fase 3: datos estructurados del lead (idioma, ruta, monto, KYC…) para el panel.
     return {"conversation_id": conversation_id, "messages": msgs,
             "lead": conv.get("lead_data", {}),
@@ -484,9 +476,9 @@ async def media_proxy(provider: str, ref: str,
     panel, sin exponer los tokens del canal al navegador."""
     tenant = T.get_config()
     if provider == "telegram":
-        content, mime = await telegram.download_file(tenant, ref)
+        content, mime = await telegram.download_file(ref)
     elif provider == "whatsapp":
-        content, mime = await whatsapp.download_media(tenant, ref)
+        content, mime = await whatsapp.download_media(ref)
     else:
         raise HTTPException(status_code=422, detail="provider inválido")
     if content is None:
@@ -504,7 +496,7 @@ def advisors_list(user: dict = Depends(auth.require("conversations:read"))):
     tenant = T.get_config()
     tenant_id = tenant["id"]
     return {"advisors": [auth._public_user(u) for u in auth.list_advisors(tenant_id)],
-            "load": db.handoff_load_by_agent(tenant_id)}
+            "load": db.handoff_load_by_agent()}
 
 
 @router.post("/api/conversations/{conversation_id}/assign")
@@ -515,8 +507,8 @@ def conversation_assign(conversation_id: str, body: AssignIn,
     email = (body.email or "").strip().lower() or None
     if email and not auth.user_from_email(email):
         raise HTTPException(status_code=422, detail=f"Usuario '{email}' no existe en el panel")
-    db.assign_conversation(tenant_id, conversation_id, email)
-    db.add_audit_event(tenant_id, user.get("email"), "conversation.assign",
+    db.assign_conversation(conversation_id, email)
+    db.add_audit_event(user.get("email"), "conversation.assign",
                        f"conversation:{conversation_id}", {"assigned_to": email})
     return {"conversation_id": conversation_id, "assigned_to": email}
 
@@ -539,10 +531,10 @@ async def _deliver_to_user(tenant: dict, conv: dict, text: str) -> dict:
             chat_id = int(ref[3:])
         except ValueError:
             return {"sent": False, "reason": "chat_id inválido"}
-        r = await telegram.send_message(tenant, chat_id, text)
+        r = await telegram.send_message(chat_id, text)
         return {"sent": bool(r.get("ok")), "channel": "telegram"}
     if channel == "whatsapp" and ref.startswith("wa:"):
-        r = await whatsapp.send_text(tenant, ref[3:], text)
+        r = await whatsapp.send_text(ref[3:], text)
         return {"sent": bool(r.get("sent")), "channel": "whatsapp"}
     # webchat u otro: se guarda; el cliente lo verá al refrescar (no hay push).
     return {"sent": False, "channel": channel or "webchat", "reason": "canal sin envío push"}
@@ -558,18 +550,18 @@ async def conversation_reply(conversation_id: str, body: ReplyIn,
     text = (body.text or "").strip()
     if not text:
         raise HTTPException(status_code=422, detail="Mensaje vacío")
-    conv = db.get_conversation(tenant_id, conversation_id)
+    conv = db.get_conversation(conversation_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
     _assert_conversation_access(user, conv)
-    db.add_message(tenant_id, conversation_id, "assistant", text)
+    db.add_message(conversation_id, "assistant", text)
     # Al responder un asesor, la conversación queda en handoff (bot en pausa).
     if conv.get("status") != "handoff":
-        db.set_conversation_status(tenant_id, conversation_id, "handoff")
+        db.set_conversation_status(conversation_id, "handoff")
     if not conv.get("assigned_to"):
-        db.assign_conversation(tenant_id, conversation_id, user.get("email"))
+        db.assign_conversation(conversation_id, user.get("email"))
     delivery = await _deliver_to_user(tenant, conv, text)
-    db.add_audit_event(tenant_id, user.get("email"), "conversation.reply",
+    db.add_audit_event(user.get("email"), "conversation.reply",
                        f"conversation:{conversation_id}", {"channel": conv.get("channel"),
                                                            "sent": delivery.get("sent")})
     return {"conversation_id": conversation_id, "delivery": delivery}
@@ -590,7 +582,7 @@ async def conversation_send_image(conversation_id: str, body: ImageIn,
     url = (body.image_url or "").strip()
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=422, detail="image_url debe ser una URL http(s) pública")
-    conv = db.get_conversation(tenant_id, conversation_id)
+    conv = db.get_conversation(conversation_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
     _assert_conversation_access(user, conv)
@@ -602,10 +594,10 @@ async def conversation_send_image(conversation_id: str, body: ImageIn,
             chat_id = int(ref[3:])
         except ValueError:
             raise HTTPException(status_code=422, detail="chat_id inválido")
-        r = await telegram.send_photo(tenant, chat_id, url, caption)
+        r = await telegram.send_photo(chat_id, url, caption)
         delivery = {"sent": bool(r.get("ok")), "channel": "telegram"}
     elif channel == "whatsapp" and ref.startswith("wa:"):
-        r = await whatsapp.send_image(tenant, ref[3:], url, caption)
+        r = await whatsapp.send_image(ref[3:], url, caption)
         delivery = {"sent": bool(r.get("sent")), "channel": "whatsapp"}
     else:
         delivery = {"sent": False, "channel": channel or "webchat", "reason": "canal sin envío push"}
@@ -617,12 +609,12 @@ async def conversation_send_image(conversation_id: str, body: ImageIn,
             media = {"provider": "telegram", "kind": mref["kind"], "ref": mref["ref"],
                      "mime": "image/jpeg", "name": None, "caption": caption}
     text = (f"🖼️ {caption}" if caption else "🖼️ Imagen") if media else f"🖼️ {caption or 'Imagen'} — {url}"
-    db.add_message(tenant_id, conversation_id, "assistant", text, media=media)
+    db.add_message(conversation_id, "assistant", text, media=media)
     if conv.get("status") != "handoff":
-        db.set_conversation_status(tenant_id, conversation_id, "handoff")
+        db.set_conversation_status(conversation_id, "handoff")
     if not conv.get("assigned_to"):
-        db.assign_conversation(tenant_id, conversation_id, user.get("email"))
-    db.add_audit_event(tenant_id, user.get("email"), "conversation.send_image",
+        db.assign_conversation(conversation_id, user.get("email"))
+    db.add_audit_event(user.get("email"), "conversation.send_image",
                        f"conversation:{conversation_id}", {"channel": channel, "sent": delivery.get("sent")})
     return {"conversation_id": conversation_id, "delivery": delivery}
 
@@ -638,7 +630,7 @@ async def conversation_upload(conversation_id: str,
     Telegram por multipart (sendPhoto/sendDocument), WhatsApp subiendo a /media."""
     tenant = T.get_config()
     tenant_id = tenant["id"]
-    conv = db.get_conversation(tenant_id, conversation_id)
+    conv = db.get_conversation(conversation_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
     _assert_conversation_access(user, conv)
@@ -657,12 +649,12 @@ async def conversation_upload(conversation_id: str,
             chat_id = int(ref[3:])
         except ValueError:
             raise HTTPException(status_code=422, detail="chat_id inválido")
-        r = await telegram.send_file_upload(tenant, chat_id, fname, content, mime, cap)
+        r = await telegram.send_file_upload(chat_id, fname, content, mime, cap)
         delivery = {"sent": bool(r.get("ok")), "channel": "telegram", "detail": r.get("reason") or r.get("description")}
     elif channel == "whatsapp" and ref.startswith("wa:"):
         if not mime.startswith("image/"):
             raise HTTPException(status_code=422, detail="WhatsApp aquí solo acepta imagen (jpeg/png)")
-        r = await whatsapp.send_image_upload(tenant, ref[3:], fname, content, mime, cap)
+        r = await whatsapp.send_image_upload(ref[3:], fname, content, mime, cap)
         delivery = {"sent": bool(r.get("sent")), "channel": "whatsapp", "detail": r.get("reason") or r.get("detail")}
     else:
         delivery = {"sent": False, "channel": channel or "webchat", "reason": "canal sin envío push"}
@@ -677,12 +669,12 @@ async def conversation_upload(conversation_id: str,
     elif delivery.get("sent") and channel == "whatsapp" and r.get("media_id"):
         media = {"provider": "whatsapp", "kind": "image", "ref": r["media_id"],
                  "mime": mime, "name": fname, "caption": cap}
-    db.add_message(tenant_id, conversation_id, "assistant", f"{label} {cap or fname}", media=media)
+    db.add_message(conversation_id, "assistant", f"{label} {cap or fname}", media=media)
     if conv.get("status") != "handoff":
-        db.set_conversation_status(tenant_id, conversation_id, "handoff")
+        db.set_conversation_status(conversation_id, "handoff")
     if not conv.get("assigned_to"):
-        db.assign_conversation(tenant_id, conversation_id, user.get("email"))
-    db.add_audit_event(tenant_id, user.get("email"), "conversation.upload",
+        db.assign_conversation(conversation_id, user.get("email"))
+    db.add_audit_event(user.get("email"), "conversation.upload",
                        f"conversation:{conversation_id}",
                        {"channel": channel, "filename": fname, "mime": mime, "sent": delivery.get("sent")})
     return {"conversation_id": conversation_id, "filename": fname, "delivery": delivery}
@@ -697,16 +689,16 @@ def conversation_status(conversation_id: str, body: StatusIn,
     status = (body.status or "").strip().lower()
     if status not in {"handoff", "active", "closed"}:
         raise HTTPException(status_code=422, detail="status debe ser handoff | active | closed")
-    conv = db.get_conversation(tenant_id, conversation_id)
+    conv = db.get_conversation(conversation_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
     _assert_conversation_access(user, conv)
-    db.set_conversation_status(tenant_id, conversation_id, status)
-    if status == "handoff" and not (db.get_conversation(tenant_id, conversation_id) or {}).get("assigned_to"):
-        db.assign_conversation(tenant_id, conversation_id, user.get("email"))
+    db.set_conversation_status(conversation_id, status)
+    if status == "handoff" and not (db.get_conversation(conversation_id) or {}).get("assigned_to"):
+        db.assign_conversation(conversation_id, user.get("email"))
     if status == "active":
-        db.assign_conversation(tenant_id, conversation_id, None)  # devuelto al bot
-    db.add_audit_event(tenant_id, user.get("email"), "conversation.status",
+        db.assign_conversation(conversation_id, None)  # devuelto al bot
+    db.add_audit_event(user.get("email"), "conversation.status",
                        f"conversation:{conversation_id}", {"status": status})
     return {"conversation_id": conversation_id, "status": status}
 
@@ -717,7 +709,7 @@ def export_tenant(limit: int = 500,
     """Exporta conversaciones + mensajes del tenant (portabilidad / offboarding)."""
     tenant = T.get_config()
     tenant_id = tenant["id"]
-    return {"tenant_id": tenant_id, "conversations": db.export_conversations(tenant_id, limit)}
+    return {"tenant_id": tenant_id, "conversations": db.export_conversations(limit)}
 
 
 @router.get("/api/appointments")
@@ -725,15 +717,15 @@ def appointments(limit: int = 100,
                  user: dict = Depends(auth.require("conversations:read"))):
     tenant = T.get_config()
     tenant_id = tenant["id"]
-    return {"appointments": db.list_appointments(tenant_id, limit)}
+    return {"appointments": db.list_appointments(limit)}
 
 
 @router.get("/api/usage")
 def usage(limit: int = 100,
           user: dict = Depends(auth.require("usage:read"))):
     tenant_id = T.get_config()["id"]
-    return {"summary": db.usage_summary(tenant_id),
-            "events": db.usage_events(tenant_id, limit)}
+    return {"summary": db.usage_summary(),
+            "events": db.usage_events(limit)}
 
 
 @router.get("/api/ops/metrics")
@@ -756,7 +748,7 @@ def ops_dead_letter(limit: int = 100, user: dict = Depends(auth.require("usage:r
 def ops_usage_daily(user: dict = Depends(auth.require("usage:read"))):
     """Agregación de consumo/costo por día y tenant."""
     tenant_id = T.get_config()["id"]
-    return {"daily": db.usage_daily(tenant_id)}
+    return {"daily": db.usage_daily()}
 
 
 # ---------- auth / panel interno ----------
@@ -851,7 +843,7 @@ async def telegram_webhook(request: Request):
     ):
         return {"ok": True, "queued": True}
     # Telegram reintenta si tardamos: respondemos 200 rápido y procesamos aparte.
-    asyncio.create_task(telegram.process_update(tenant, body))
+    asyncio.create_task(telegram.process_update(body))
     return {"ok": True}
 
 
@@ -866,7 +858,7 @@ async def telegram_set_webhook(body: TgWebhookIn,
     tenant = T.get_config()
     if not body.base_url.strip():
         raise HTTPException(status_code=422, detail="Falta 'base_url' (URL pública HTTPS)")
-    return await telegram.set_webhook(tenant, body.base_url.strip())
+    return await telegram.set_webhook(body.base_url.strip())
 
 
 @router.post("/api/telegram/delete-webhook")
@@ -877,5 +869,5 @@ async def telegram_delete_webhook(user: dict = Depends(auth.require("config:writ
 @router.get("/api/telegram/info")
 async def telegram_info(user: dict = Depends(auth.require("config:read"))):
     tenant = T.get_config()
-    return {"getMe": await telegram.get_me(tenant),
-            "webhook": await telegram.get_webhook_info(tenant)}
+    return {"getMe": await telegram.get_me(),
+            "webhook": await telegram.get_webhook_info()}
