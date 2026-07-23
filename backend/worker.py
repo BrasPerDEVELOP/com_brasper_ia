@@ -66,7 +66,6 @@ async def handle_channel_message(payload: dict) -> None:
         return
     channel = payload["channel"]
     out = await engine.handle_message(
-        tenant,
         payload["user_ref"],
         payload["text"],
         channel=channel,

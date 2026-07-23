@@ -96,7 +96,7 @@ async def chat(body: ChatIn, request: Request,
     if not body.message.strip():
         raise HTTPException(status_code=422, detail="Mensaje vacío")
     try:
-        out = await engine.handle_message(tenant, body.user_ref, body.message.strip(),
+        out = await engine.handle_message(body.user_ref, body.message.strip(),
                                           channel="webchat",
                                           conversation_id=body.conversation_id)
         # Lead nuevo: en webchat el banner se antepone al texto de respuesta.
@@ -129,7 +129,7 @@ async def consulta_webchat(body: WebChatIn, request: Request,
     session_id = (conversation_id or body.session_id or "webchat").strip() or "webchat"
     tenant = T.get_config()
     try:
-        out = await engine.handle_message(tenant, f"webchat:{session_id}", body.message.strip(),
+        out = await engine.handle_message(f"webchat:{session_id}", body.message.strip(),
                                           channel="webchat", conversation_id=session_id)
         response = out.get("response") or ""
         banner = out.get("banner")
@@ -170,7 +170,7 @@ async def _handle_whatsapp_audio(tenant: dict, msg: dict, user_ref: str) -> dict
         return {**base, "sent": False, "reason": f"audio: {e}"}
     if not tr.get("ok") or not (tr.get("text") or "").strip():
         return {**base, "sent": False, "reason": f"audio no transcrito: {tr.get('error')}"}
-    out = await engine.handle_message(tenant, user_ref, tr["text"].strip(), channel="whatsapp")
+    out = await engine.handle_message(user_ref, tr["text"].strip(), channel="whatsapp")
     send = await whatsapp.send_text(msg["from"], out["response"])
     return {**base, "transcribed": True, "sent": send.get("sent", False)}
 
@@ -245,7 +245,7 @@ async def webhook_receive(request: Request):
                             "resolved": True, "queued": True})
             continue
         try:
-            out = await engine.handle_message(tenant, user_ref, msg["text"],
+            out = await engine.handle_message(user_ref, msg["text"],
                                               channel="whatsapp")
         except engine.ConversationBusyError as e:
             results.append({"tenant": tenant["id"], "from": msg["from"],

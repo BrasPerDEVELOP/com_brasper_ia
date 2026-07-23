@@ -98,7 +98,7 @@ def case_isolation():
 def case_handoff():
     tenant = T.get_tenant("brasper")
     assert tenant is not None, "tenant brasper no encontrado"
-    out = _run(engine.handle_message(tenant, "user-handoff", "quiero un asesor"))
+    out = _run(engine.handle_message("user-handoff", "quiero un asesor"))
     assert out["handoff"] is True, f"handoff deberia ser True, fue {out['handoff']}"
     assert out["usage"] is None, f"usage deberia ser None en handoff, fue {out['usage']}"
     # Con takeover el asesor atiende DENTRO del bot: el mensaje lo anuncia y no
@@ -461,7 +461,7 @@ def case_langgraph_llm_path():
     tenant = T.get_tenant("brasper")
     assert tenant is not None, "tenant brasper no encontrado"
     # Sin señal de cotización (eso ahora lo captura el cotizador determinista, caso 26).
-    out = _run(engine.handle_message(tenant, "user-langgraph", "hola, que documentos necesito?"))
+    out = _run(engine.handle_message("user-langgraph", "hola, que documentos necesito?"))
     assert out["handoff"] is False, out
     assert out["response"] == "[respuesta simulada]", out
     assert out["usage"]["model"] == tenant.get("llm", {}).get("model"), out["usage"]
@@ -518,7 +518,6 @@ def case_tool_router_path():
     llm.chat = _capture_chat
     try:
         out = _run(engine.handle_message(
-            tenant,
             "user-tool",
             "consulta stock sku SKU123",
             channel="webchat",
@@ -542,7 +541,6 @@ def case_calendar_appointment_path():
     tenant = T.get_tenant("clinica_demo")
     assert tenant is not None, "tenant clinica_demo no encontrado"
     out = _run(engine.handle_message(
-        tenant,
         "patient-1",
         "quiero agendar cita nombre Juan Perez dni 12345678 especialidad odontologia 2026-07-10 10:30",
         channel="webchat",
@@ -689,13 +687,13 @@ def case_human_takeover():
     from main import app
     tenant = T.get_tenant("brasper")
 
-    out1 = _run(engine.handle_message(tenant, "tk:1", "hola"))
+    out1 = _run(engine.handle_message("tk:1", "hola"))
     cid = out1["conversation_id"]
     assert not out1.get("paused") and out1["response"], out1
 
     db.set_conversation_status("brasper", cid, "handoff")  # asesor toma
     before = len(db.get_messages("brasper", cid))
-    out2 = _run(engine.handle_message(tenant, "tk:1", "sigo ahi?", conversation_id=cid))
+    out2 = _run(engine.handle_message("tk:1", "sigo ahi?", conversation_id=cid))
     assert out2.get("paused") is True, out2
     assert (out2["response"] or "") == "" and out2["usage"] is None, out2
     msgs = db.get_messages("brasper", cid)
@@ -714,7 +712,7 @@ def case_human_takeover():
     r2 = client.post(f"/api/brasper/conversations/{cid}/status",
                      headers={"X-Auth-Token": "demo-owner"}, json={"status": "active"})
     assert r2.status_code == 200, r2.text
-    out3 = _run(engine.handle_message(tenant, "tk:1", "hola de nuevo", conversation_id=cid))
+    out3 = _run(engine.handle_message("tk:1", "hola de nuevo", conversation_id=cid))
     assert not out3.get("paused") and out3["response"], out3
 
 
@@ -930,7 +928,7 @@ def case_quote_graph_path():
 
     brasper_api._fetch = _fake_fetch
     try:
-        out = _run(engine.handle_message(tenant, "user-quote", "Cotizar 500 PEN a BRL"))
+        out = _run(engine.handle_message("user-quote", "Cotizar 500 PEN a BRL"))
         assert out["handoff"] is False, out
         assert out["usage"] is None, "la cotización no debe llamar al LLM"
         assert "710.29" in out["response"].replace(",", ""), out["response"]
@@ -940,21 +938,21 @@ def case_quote_graph_path():
         brasper_api._fetch = saved_fetch
 
     # Cotización incompleta/ambigua -> ahora la maneja el LLM (entiende typos, guía).
-    out2 = _run(engine.handle_message(tenant, "user-quote", "quiero cotizar"))
+    out2 = _run(engine.handle_message("user-quote", "quiero cotizar"))
     assert out2["usage"] is not None, f"incompleta debe ir al LLM: {out2}"
     assert out2["response"] == "[respuesta simulada]", out2["response"]
 
     # Typo en la moneda destino ('olesñ'≈soles): antes daba mensaje genérico; ahora -> LLM.
-    out_typo = _run(engine.handle_message(tenant, "user-quote2", "500 reales a olesñ"))
+    out_typo = _run(engine.handle_message("user-quote2", "500 reales a olesñ"))
     assert out_typo["usage"] is not None, f"typo debe delegarse al LLM, no mensaje genérico: {out_typo}"
 
     # clinica_demo no tiene cotizador: el mismo texto va por otra ruta (LLM stub).
     clinica = T.get_tenant("clinica_demo")
-    out3 = _run(engine.handle_message(clinica, "user-quote", "Cotizar 500 PEN a BRL"))
+    out3 = _run(engine.handle_message("user-quote", "Cotizar 500 PEN a BRL"))
     assert "710" not in out3["response"], out3["response"]
 
     # Señal débil sin datos ("envío" como sustantivo) NO debe caer al cotizador.
-    out4 = _run(engine.handle_message(tenant, "user-quote", "que documentos necesito para el envio?"))
+    out4 = _run(engine.handle_message("user-quote", "que documentos necesito para el envio?"))
     assert out4["response"] == "[respuesta simulada]", f"debe ir al LLM: {out4['response']}"
 
 
@@ -962,7 +960,7 @@ def case_advisor_assignment():
     """Handoff deriva la conversación al asesor con menos carga (agent@brasper.com)."""
     auth_mod.ensure_seed()
     tenant = T.get_tenant("brasper")
-    out = _run(engine.handle_message(tenant, "user-deriv-1", "quiero hablar con un asesor"))
+    out = _run(engine.handle_message("user-deriv-1", "quiero hablar con un asesor"))
     assert out["handoff"] is True, out
     convs = db.list_conversations("brasper")
     mine = [c for c in convs if c["user_ref"] == "user-deriv-1"]
@@ -985,7 +983,7 @@ def case_checkout_handoff():
     }]}
     try:
         out = _run(engine.handle_message(
-            tenant, "user-checkout-1", "listo, ¿cómo pago?", conversation_id=cid
+            "user-checkout-1", "listo, ¿cómo pago?", conversation_id=cid
         ))
     finally:
         brasper_api.deposit_accounts = saved
@@ -995,7 +993,7 @@ def case_checkout_handoff():
     assert db.get_lead_data("brasper", cid)["commercial_stage"] == "awaiting_deposit"
 
     # Un pedido de cotización COMPLETO (monto+monedas) NO es checkout: cotiza igual.
-    out3 = _run(engine.handle_message(tenant, "user-checkout-3", "quiero hacer el envío de 500 PEN a BRL"))
+    out3 = _run(engine.handle_message("user-checkout-3", "quiero hacer el envío de 500 PEN a BRL"))
     assert out3["handoff"] is False, f"con monto+moneda debe cotizar, no derivar: {out3}"
     assert "710.29" in out3["response"].replace(",", ""), out3["response"]
     # El CTA de la cotización invita a continuar EN el bot (no manda a WhatsApp externo).
@@ -1018,27 +1016,27 @@ def case_client_onboarding_without_transaction():
     }]}
     try:
         assert not hasattr(brasper_api, "register_operation"), "la IA no debe exponer creación de operaciones"
-        out = _run(engine.handle_message(tenant, "wa:51999111222", "hola", channel="whatsapp"))
+        out = _run(engine.handle_message("wa:51999111222", "hola", channel="whatsapp"))
         cid = out["conversation_id"]
         assert "nombre completo" in out["response"].lower(), out
         out = _run(engine.handle_message(
-            tenant, "wa:51999111222", "Ana María Pérez Soto", channel="whatsapp", conversation_id=cid
+            "wa:51999111222", "Ana María Pérez Soto", channel="whatsapp", conversation_id=cid
         ))
         assert "cuánto" in out["response"].lower(), out
 
         # La cotización no exige DNI/correo y no queda atrapada en onboarding.
         out = _run(engine.handle_message(
-            tenant, "wa:51999111222", "Cotizar 500 PEN a BRL", channel="whatsapp", conversation_id=cid
+            "wa:51999111222", "Cotizar 500 PEN a BRL", channel="whatsapp", conversation_id=cid
         ))
         assert "cotización" in out["response"].lower() and "documento" not in out["response"].lower(), out
 
         out = _run(engine.handle_message(
-            tenant, "wa:51999111222", "continuar", channel="whatsapp", conversation_id=cid
+            "wa:51999111222", "continuar", channel="whatsapp", conversation_id=cid
         ))
         assert "tipo de documento" in out["response"].lower(), out
         for answer in ("DNI", "12345678"):
             out = _run(engine.handle_message(
-                tenant, "wa:51999111222", answer, channel="whatsapp", conversation_id=cid
+                "wa:51999111222", answer, channel="whatsapp", conversation_id=cid
             ))
         lead = db.get_lead_data("brasper", cid)
         assert lead["brasper_user_id"] == "client-uuid" and lead["telefono"] == "999111222", lead
@@ -1061,7 +1059,7 @@ def case_returning_client_by_phone():
     }}
     try:
         out = _run(engine.handle_message(
-            tenant, "wa:51999222333", "hola", channel="whatsapp"
+            "wa:51999222333", "hola", channel="whatsapp"
         ))
         lead = db.get_lead_data("brasper", out["conversation_id"])
         assert "Carlos" in out["response"] and "nuevamente" in out["response"], out
@@ -1083,7 +1081,7 @@ def case_deposit_failure_creates_handoff():
     brasper_api.deposit_accounts = lambda *args, **kwargs: {"ok": False, "error": "timeout"}
     try:
         out = _run(engine.handle_message(
-            tenant, "deposit-failure", "continuar", conversation_id=cid
+            "deposit-failure", "continuar", conversation_id=cid
         ))
     finally:
         brasper_api.deposit_accounts = saved
@@ -1167,7 +1165,7 @@ def case_no_external_channel_guard():
                 "tokens_in": 3, "tokens_out": 3, "model": "stub", "provider": "stub", "cost_usd": 0.0}
     llm.chat = _wa_chat
     try:
-        out = _run(engine.handle_message(tenant, "guard-e2e", "hola", conversation_id=cid))
+        out = _run(engine.handle_message("guard-e2e", "hola", conversation_id=cid))
     finally:
         llm.chat = old
     assert "whatsapp" not in out["response"].lower() and "wa.me" not in out["response"].lower(), out
@@ -1272,11 +1270,11 @@ def case_new_lead_and_banner():
     saved_find = brasper_api.find_client
     brasper_api.find_client = lambda *args, **kwargs: {"ok": True, "data": None, "ambiguous": False}
     try:
-        out = _run(engine.handle_message(tenant, "lead-nuevo-xyz", "hola"))
+        out = _run(engine.handle_message("lead-nuevo-xyz", "hola"))
         assert out["new_lead"] is True and out.get("banner") is None, out
         assert "nombre completo" in out["response"].lower(), out
         out2 = _run(engine.handle_message(
-            tenant, "lead-nuevo-xyz", "Ana Pérez", conversation_id=out["conversation_id"]
+            "lead-nuevo-xyz", "Ana Pérez", conversation_id=out["conversation_id"]
         ))
         assert out2["new_lead"] is False, out2
         assert out2.get("banner") and "primer envío" in (out2["banner"]["text"] or "").lower(), out2
@@ -1287,7 +1285,7 @@ def case_new_lead_and_banner():
 def case_lead_data_capture():
     """La cotización guarda los datos estructurados del lead (Fase 3)."""
     tenant = T.get_tenant("brasper")
-    out = _run(engine.handle_message(tenant, "lead-data-xyz", "Cotizar 500 PEN a BRL"))
+    out = _run(engine.handle_message("lead-data-xyz", "Cotizar 500 PEN a BRL"))
     lead = db.get_lead_data("brasper", out["conversation_id"])
     assert lead.get("ruta") == "PEN->BRL", lead
     assert lead.get("monto_enviar") == 500.0, lead
@@ -1302,11 +1300,11 @@ def case_quote_business_rules():
     """Vigencia de TC (20 min) en el texto + monto alto deriva a asesor."""
     auth_mod.ensure_seed()
     tenant = T.get_tenant("brasper")
-    out = _run(engine.handle_message(tenant, "rules-tc", "Cotizar 500 PEN a BRL"))
+    out = _run(engine.handle_message("rules-tc", "Cotizar 500 PEN a BRL"))
     assert "20 min" in out["response"], f"debe indicar vigencia de TC: {out['response']}"
     assert out["handoff"] is False, out
     # Monto alto (>= umbral 5000) -> handoff + asesor asignado.
-    out2 = _run(engine.handle_message(tenant, "rules-high", "Cotizar 8000 PEN a BRL"))
+    out2 = _run(engine.handle_message("rules-high", "Cotizar 8000 PEN a BRL"))
     assert out2["handoff"] is True, out2
     assert "asesor" in out2["response"].lower(), out2["response"]
     assert "710" not in out2["response"] or "8000" in out2["response"].replace(",", ""), "es la cotización de 8000"
