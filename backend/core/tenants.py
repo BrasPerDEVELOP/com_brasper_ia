@@ -24,6 +24,7 @@ def get_config() -> dict:
         data = json.load(f)
     # Extraemos la configuración de 'brasper'
     tenant_cfg = data.get("tenants", {}).get("brasper", {})
+    tenant_cfg["id"] = "brasper"
     return tenant_cfg
 
 def reload_config() -> None:
