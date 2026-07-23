@@ -136,7 +136,7 @@ def pre_process(state: AgentState) -> dict[str, Any]:
     tenant = T.get_config()
     is_calendar = calendar_adapter.enabled(tenant) and calendar_adapter.has_intent(state["text"])
     is_quote = quotes.has_intent(state["text"])
-    tool_request = None if is_quote else tool_router.select_tool(tenant, state["text"])
+    tool_request = None if is_quote else tool_router.select_tool(state["text"])
     checkout = (not is_quote) and _checkout_hit(state["text"])
     lead = db.get_lead_data(state["cid"])
     onboarding = (not is_quote) and lead_onboarding.needs_onboarding(
@@ -181,7 +181,7 @@ def handle_onboarding(state: AgentState) -> dict[str, Any]:
     tenant = T.get_config()
     checkout = bool(state.get("analysis", {}).get("checkout"))
     result = lead_onboarding.process(
-        tenant, state["cid"], state["text"], state.get("channel", "webchat"),
+        state["cid"], state["text"], state.get("channel", "webchat"),
         state["user_ref"], new_lead=bool(state.get("new_lead")), checkout=checkout,
     )
     if result.get("ready_for_deposit"):
@@ -205,7 +205,7 @@ def _complete_deposit_accounts(cid: str, *,
     """Muestra cuentas oficiales o realiza un handoff seguro si no están disponibles."""
     tenant = T.get_config()
     lead = db.get_lead_data(cid)
-    reply, accounts = lead_onboarding.deposit_accounts_reply(tenant, lead)
+    reply, accounts = lead_onboarding.deposit_accounts_reply(lead)
     if persist_message:
         db.add_message(cid, "assistant", reply)
     if accounts:
