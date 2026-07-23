@@ -103,7 +103,6 @@ CREATE TABLE IF NOT EXISTS panel_users (
   email TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
   role TEXT NOT NULL,
-  tenant_scope TEXT,
   token TEXT NOT NULL UNIQUE
 );
 CREATE INDEX IF NOT EXISTS idx_panel_users_token ON panel_users(token);
@@ -115,7 +114,6 @@ CREATE TABLE IF NOT EXISTS panel_users (
   email TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
   role TEXT NOT NULL,
-  tenant_scope TEXT,
   token TEXT NOT NULL UNIQUE
 );
 CREATE INDEX IF NOT EXISTS idx_panel_users_token ON panel_users(token);
@@ -143,11 +141,11 @@ def _clean_name(name: str) -> str:
 _DEMO_TOKENS = ("demo-owner", "demo-agent-brasper", "demo-billing")
 _SEED_USERS = [
     {"email": "owner@agencia.com", "name": "Dueño Agencia",
-     "role": "owner", "tenant_scope": None, "token": "demo-owner"},
+     "role": "owner", "token": "demo-owner"},
     {"email": "agent@brasper.com", "name": "Agente Brasper",
-     "role": "agent", "tenant_scope": "brasper", "token": "demo-agent-brasper"},
+     "role": "agent", "token": "demo-agent-brasper"},
     {"email": "billing@agencia.com", "name": "Facturación Agencia",
-     "role": "billing", "tenant_scope": None, "token": "demo-billing"},
+     "role": "billing", "token": "demo-billing"},
 ]
 
 
@@ -171,13 +169,13 @@ def _seed_prod_admin(con) -> None:
     name = _clean_name(os.getenv("PANEL_ADMIN_NAME") or "Administrador")
     if db.is_postgres():
         con.execute(
-            "INSERT INTO panel_users (email, name, role, tenant_scope, token) "
-            "VALUES (?,?,?,?,?) ON CONFLICT (email) DO NOTHING",
-            (email, name, "owner", None, token))
+            "INSERT INTO panel_users (email, name, role, token) "
+            "VALUES (?,?,?,?) ON CONFLICT (email) DO NOTHING",
+            (email, name, "owner", token))
     else:
         con.execute(
-            "INSERT OR IGNORE INTO panel_users (email, name, role, tenant_scope, token) "
-            "VALUES (?,?,?,?,?)", (email, name, "owner", None, token))
+            "INSERT OR IGNORE INTO panel_users (email, name, role, token) "
+            "VALUES (?,?,?,?)", (email, name, "owner", token))
     con.execute("UPDATE panel_users SET token=?, role='owner', name=? WHERE email=?",
                 (token, name, email))
 
@@ -202,14 +200,14 @@ def ensure_seed() -> None:
         if seed_demo:
             if db.is_postgres():
                 con.executemany(
-                    "INSERT INTO panel_users (email, name, role, tenant_scope, token) "
-                    "VALUES (%(email)s, %(name)s, %(role)s, %(tenant_scope)s, %(token)s) "
+                    "INSERT INTO panel_users (email, name, role, token) "
+                    "VALUES (%(email)s, %(name)s, %(role)s, %(token)s) "
                     "ON CONFLICT (email) DO NOTHING",
                     _SEED_USERS)
             else:
                 con.executemany(
-                    "INSERT OR IGNORE INTO panel_users (email, name, role, tenant_scope, token) "
-                    "VALUES (:email, :name, :role, :tenant_scope, :token)",
+                    "INSERT OR IGNORE INTO panel_users (email, name, role, token) "
+                    "VALUES (:email, :name, :role, :token)",
                     _SEED_USERS)
 
 
@@ -222,42 +220,44 @@ def _row_to_user(row) -> dict:
         "email": row["email"],
         "name": row["name"],
         "role": row["role"],
-        "tenant_scope": row["tenant_scope"],  # None = agencia (todos los tenants)
         "token": row["token"],
     }
 
 
-def list_advisors(tenant_id: str) -> list[dict]:
-    """Asesores (rol 'agent') que pueden atender este tenant: scoped o de agencia."""
+def list_advisors() -> list[dict]:
+    """Asesores (rol 'agent') que pueden atender."""
     try:
         with db.connect() as con:
             rows = con.execute(
-                "SELECT * FROM panel_users WHERE role='agent' "
-                "AND (tenant_scope IS NULL OR tenant_scope=?) ORDER BY id",
-                (tenant_id,)).fetchall()
+                "SELECT * FROM panel_users WHERE role='agent' ORDER BY id"
+            ).fetchall()
     except Exception:  # noqa: BLE001 - tabla aún no creada: sin asesores, no rompe el handoff
         return []
     return [_row_to_user(r) for r in rows]
 
 
-def pick_advisor(tenant_id: str) -> dict | None:
+def pick_advisor() -> dict | None:
     """Derivación: elige el asesor con menos conversaciones en handoff activas."""
-    advisors = list_advisors(tenant_id)
+    advisors = list_advisors()
     if not advisors:
         return None
-    load = db.handoff_load_by_agent(tenant_id)
+    from core import tenants as T
+    config = T.get_config()
+    load = db.handoff_load_by_agent(config["id"])
     return min(advisors, key=lambda u: (load.get(u["email"], 0), u["id"]))
 
 
-def derive_to_advisor(tenant_id: str, conversation_id: str) -> str | None:
+def derive_to_advisor(conversation_id: str) -> str | None:
     """Asigna la conversación al asesor con menos carga y devuelve su email (o None).
 
     Usado por el handoff del grafo y por la recepción de comprobantes (Telegram/
     WhatsApp): un solo punto de derivación para todo el sistema (DRY)."""
-    advisor = pick_advisor(tenant_id)
+    advisor = pick_advisor()
     if advisor:
         try:
-            db.assign_conversation(tenant_id, conversation_id, advisor["email"])
+            from core import tenants as T
+            config = T.get_config()
+            db.assign_conversation(config["id"], conversation_id, advisor["email"])
         except Exception:  # noqa: BLE001 - asignación best-effort, no rompe el flujo
             return None
         return advisor["email"]
@@ -311,23 +311,21 @@ def _public_user(user: dict) -> dict:
         "email": user["email"],
         "name": user["name"],
         "role": user["role"],
-        "tenant_scope": user["tenant_scope"],
-        "is_agency": user["tenant_scope"] is None,
         "permissions": permissions_for(user),
     }
 
 
 def create_user(email: str, name: str, role: str,
-                tenant_scope: str | None = None, token: str | None = None) -> dict:
+                token: str | None = None) -> dict:
     """Alta de usuario (gestión interna). Genera token opaco si no se pasa uno."""
     if role not in ROLE_PERMS:
         raise ValueError(f"Rol desconocido: {role!r}")
     token = token or secrets.token_urlsafe(24)
     with db.connect() as con:
         con.execute(
-            "INSERT INTO panel_users (email, name, role, tenant_scope, token) "
-            "VALUES (?,?,?,?,?)",
-            (normalize_email(email), name, role, tenant_scope, token))
+            "INSERT INTO panel_users (email, name, role, token) "
+            "VALUES (?,?,?,?)",
+            (normalize_email(email), name, role, token))
         row = con.execute("SELECT * FROM panel_users WHERE email=?", (normalize_email(email),)).fetchone()
     return _row_to_user(row)
 

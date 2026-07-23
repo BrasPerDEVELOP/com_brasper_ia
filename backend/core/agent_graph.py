@@ -8,6 +8,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from core import tenants as T
 from . import auth, calendar_adapter, connectors, db, lead_onboarding, llm, observability, policies, quotes, tool_router, util
 
 
@@ -61,6 +62,7 @@ class AgentState(TypedDict, total=False):
     handoff: bool
     usage: dict | None
     new_lead: bool
+    banner: dict | None
 
 
 # Intención de PROCEDER con el envío tras una cotización (checkout). Deben ser
@@ -78,19 +80,22 @@ _DEFAULT_CHECKOUT_KEYWORDS = (
 )
 
 
-def _handoff_hit(tenant: dict, text: str) -> bool:
+def _handoff_hit(text: str) -> bool:
+    tenant = T.get_config()
     kws = tenant.get("handoff", {}).get("keywords", [])
     low = text.lower()
     return any(k in low for k in kws)
 
 
-def _checkout_hit(tenant: dict, text: str) -> bool:
+def _checkout_hit(text: str) -> bool:
+    tenant = T.get_config()
     kws = tenant.get("handoff", {}).get("checkout_keywords") or _DEFAULT_CHECKOUT_KEYWORDS
     low = text.lower()
     return any(k in low for k in kws)
 
 
-def _handoff_reply(tenant: dict, checkout: bool = False) -> str:
+def _handoff_reply(checkout: bool = False) -> str:
+    tenant = T.get_config()
     h = tenant.get("handoff", {})
     if checkout:
         default = ("¡Perfecto! Un asesor te contactará aquí mismo para completar tu envío 🙌 "
@@ -107,43 +112,40 @@ def _language_line(language: str) -> str:
 
 
 def start_conversation(state: AgentState) -> dict[str, Any]:
-    tenant = state["tenant"]
-    tid = tenant["id"]
     cid = db.get_or_create_conversation(
-        tid,
         state["user_ref"],
         state.get("channel", "webchat"),
         state.get("conversation_id"),
     )
     # Estado ANTES de este mensaje: si ya está en 'handoff', un humano la atiende
     # y el bot no debe responder (se registra el mensaje para que el asesor lo vea).
-    prev_status = db.conversation_status(tid, cid)
+    prev_status = db.conversation_status(cid)
     # Lead nuevo: primer mensaje de este usuario (antes de guardarlo).
-    new_lead = db.is_first_contact(tid, state["user_ref"])
-    db.add_message(tid, cid, "user", state["text"], media=state.get("user_media"))
+    new_lead = db.is_first_contact(state["user_ref"])
+    db.add_message(cid, "user", state["text"], media=state.get("user_media"))
     # Fase 3: guarda datos base del lead (canal). Idioma/ruta/monto se completan luego.
-    db.merge_lead_data(tid, cid, {"canal": state.get("channel", "webchat")})
-    observability.event("message.received", tenant_id=tid, channel=state.get("channel", "webchat"), conversation_id=cid)
+    db.merge_lead_data(cid, {"canal": state.get("channel", "webchat")})
+    observability.event("message.received", channel=state.get("channel", "webchat"), conversation_id=cid)
     if new_lead:
-        observability.event("lead.new", tenant_id=tid, conversation_id=cid, channel=state.get("channel", "webchat"))
-    return {"tenant_id": tid, "cid": cid, "conv_status": prev_status, "new_lead": new_lead}
+        observability.event("lead.new", conversation_id=cid, channel=state.get("channel", "webchat"))
+    return {"cid": cid, "conv_status": prev_status, "new_lead": new_lead}
 
 
 def pre_process(state: AgentState) -> dict[str, Any]:
     analysis = policies.pre_process(state["text"])
-    tenant = state["tenant"]
+    tenant = T.get_config()
     is_calendar = calendar_adapter.enabled(tenant) and calendar_adapter.has_intent(state["text"])
-    is_quote = quotes.has_intent(tenant, state["text"])
+    is_quote = quotes.has_intent(state["text"])
     tool_request = None if is_quote else tool_router.select_tool(tenant, state["text"])
-    checkout = (not is_quote) and _checkout_hit(tenant, state["text"])
-    lead = db.get_lead_data(tenant["id"], state["cid"])
-    onboarding = lead_onboarding.needs_onboarding(
+    checkout = (not is_quote) and _checkout_hit(state["text"])
+    lead = db.get_lead_data(state["cid"])
+    onboarding = (not is_quote) and lead_onboarding.needs_onboarding(
         lead, new_lead=bool(state.get("new_lead")), checkout=checkout, text=state["text"]
     )
     return {
         "analysis": {
             **analysis,
-            "handoff": _handoff_hit(tenant, state["text"]),
+            "handoff": _handoff_hit(state["text"]),
             "checkout": checkout,
             "onboarding": onboarding,
             "calendar": is_calendar,
@@ -176,29 +178,48 @@ def route_after_preprocess(state: AgentState) -> str:
 
 
 def handle_onboarding(state: AgentState) -> dict[str, Any]:
+    tenant = T.get_config()
+    checkout = bool(state.get("analysis", {}).get("checkout"))
     result = lead_onboarding.process(
-        state["tenant"], state["cid"], state["text"], state.get("channel", "webchat"),
-        state["user_ref"], new_lead=bool(state.get("new_lead")),
+        tenant, state["cid"], state["text"], state.get("channel", "webchat"),
+        state["user_ref"], new_lead=bool(state.get("new_lead")), checkout=checkout,
     )
-    db.add_message(state["tenant"]["id"], state["cid"], "assistant", result["response"])
-    if result.get("handoff"):
-        db.set_conversation_status(state["tenant"]["id"], state["cid"], "handoff")
-        auth.derive_to_advisor(state["tenant"]["id"], state["cid"])
+    if result.get("ready_for_deposit"):
+        deposit = _complete_deposit_accounts(state["cid"])
+        result["response"] = f"{result['response']}\n\n{deposit['response']}"
+        result["handoff"] = deposit["handoff"]
+    db.add_message(state["cid"], "assistant", result["response"])
+    if (result.get("handoff") and
+            db.conversation_status(state["cid"]) != "handoff"):
+        db.set_conversation_status(state["cid"], "handoff")
+        auth.derive_to_advisor(tenant["id"], state["cid"])
     return result
 
 
 def handle_deposit_accounts(state: AgentState) -> dict[str, Any]:
-    tenant, cid = state["tenant"], state["cid"]
-    lead = db.get_lead_data(tenant["id"], cid)
+    return _complete_deposit_accounts(state["cid"], persist_message=True)
+
+
+def _complete_deposit_accounts(cid: str, *,
+                               persist_message: bool = False) -> dict[str, Any]:
+    """Muestra cuentas oficiales o realiza un handoff seguro si no están disponibles."""
+    tenant = T.get_config()
+    lead = db.get_lead_data(cid)
     reply, accounts = lead_onboarding.deposit_accounts_reply(tenant, lead)
-    db.add_message(tenant["id"], cid, "assistant", reply)
+    if persist_message:
+        db.add_message(cid, "assistant", reply)
     if accounts:
-        db.merge_lead_data(tenant["id"], cid, {
+        db.merge_lead_data(cid, {
             "commercial_stage": "awaiting_deposit",
             "deposit_accounts_shown": [str(item.get("id")) for item in accounts],
             "deposit_accounts_shown_at": util.now_iso(),
         })
-    return {"response": reply, "handoff": False, "usage": None}
+        return {"response": reply, "handoff": False, "usage": None}
+    db.set_conversation_status(cid, "handoff")
+    assigned = auth.derive_to_advisor(tenant["id"], cid)
+    observability.event("conversation.handoff", conversation_id=cid,
+                        reason="deposit_accounts_unavailable", assigned_to=assigned)
+    return {"response": reply, "handoff": True, "usage": None}
 
 
 def route_after_tool(state: AgentState) -> str:
@@ -213,14 +234,14 @@ def route_after_quote(state: AgentState) -> str:
 
 
 def handoff(state: AgentState) -> dict[str, Any]:
-    tenant = state["tenant"]
+    tenant = T.get_config()
     checkout = bool(state.get("analysis", {}).get("checkout"))
-    reply = _handoff_reply(tenant, checkout=checkout)
-    db.add_message(tenant["id"], state["cid"], "assistant", reply)
-    db.set_conversation_status(tenant["id"], state["cid"], "handoff")
+    reply = _handoff_reply(checkout=checkout)
+    db.add_message(state["cid"], "assistant", reply)
+    db.set_conversation_status(state["cid"], "handoff")
     # Derivación: asigna la conversación al asesor con menos carga (si hay).
     assigned = auth.derive_to_advisor(tenant["id"], state["cid"])
-    observability.event("conversation.handoff", tenant_id=tenant["id"], conversation_id=state["cid"],
+    observability.event("conversation.handoff", conversation_id=state["cid"],
                         reason="checkout" if checkout else "keyword", assigned_to=assigned)
     return {"response": reply, "handoff": True, "usage": None}
 
@@ -228,8 +249,7 @@ def handoff(state: AgentState) -> dict[str, Any]:
 def paused(state: AgentState) -> dict[str, Any]:
     """Conversación atendida por un asesor humano: el bot queda en silencio.
     El mensaje del usuario ya se guardó (start_conversation) para que el asesor lo vea."""
-    observability.event("conversation.bot_paused", tenant_id=state["tenant"]["id"],
-                        conversation_id=state["cid"])
+    observability.event("conversation.bot_paused", conversation_id=state["cid"])
     return {"response": "", "handoff": True, "usage": None, "paused": True}
 
 
@@ -240,34 +260,33 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
     monedas claras. Si viene incompleto o ambiguo (p.ej. typos como 'olesñ'),
     delega al LLM para que lo interprete y guíe con naturalidad.
     """
-    tenant = state["tenant"]
+    tenant = T.get_config()
     # Contexto de la última cotización (para "continuar la misma línea" cuando el
     # siguiente mensaje solo cambia el monto, p.ej. "¿y para 2000 soles?").
-    _lead = db.get_lead_data(tenant["id"], state["cid"])
+    _lead = db.get_lead_data(state["cid"])
     _prev = None
     _ruta = str(_lead.get("ruta") or "")
     if "->" in _ruta:
         _o, _d = _ruta.split("->", 1)
         _prev = {"origin": _o.strip(), "destination": _d.strip(), "mode": _lead.get("modo")}
-    request = quotes.extract_request(tenant, state["text"], prev=_prev)
+    request = quotes.extract_request(state["text"], prev=_prev)
     if request["missing"]:
         # Pedido de cotización incompleto: en vez de delegar al LLM (que podía
         # decir "no tengo el tipo de cambio"), respondemos una aclaración concreta
         # y determinista, pidiendo SOLO el dato faltante con opciones del corredor.
         language = state.get("analysis", {}).get("language", "es")
-        reply = quotes.clarify_reply(tenant, request, language)
-        db.add_message(tenant["id"], state["cid"], "assistant", reply)
-        observability.event("quote.clarify", tenant_id=tenant["id"],
-                            conversation_id=state["cid"], missing=request["missing"])
+        reply = quotes.clarify_reply(request, language)
+        db.add_message(state["cid"], "assistant", reply)
+        observability.event("quote.clarify", conversation_id=state["cid"], missing=request["missing"])
         return {"response": reply, "handoff": False, "usage": None}
-    quote = quotes.compute(tenant, request["origin"], request["destination"],
+    quote = quotes.compute(request["origin"], request["destination"],
                            request["amount"], request["mode"])
     language = state.get("analysis", {}).get("language", "es")
-    reply = quotes.reply(tenant, quote, language)
+    reply = quotes.reply(quote, language)
     tid, cid = tenant["id"], state["cid"]
     # Fase 3: guarda en el lead los datos que produjo la cotización (visibles en el panel).
     if not quote.get("error"):
-        db.merge_lead_data(tid, cid, {
+        db.merge_lead_data(cid, {
             "idioma": language,
             "ruta": f"{request['origin']}->{request['destination']}",
             "modo": request["mode"],
@@ -278,24 +297,37 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
             "aplica_promo": bool(quote.get("coupon_code")),
             "cotizado_en": util.now_iso(),
         })
+        conv = db.get_conversation(cid)
+        cust_id = conv.get("customer_id") if conv else None
+        db.create_quote(
+            customer_id=cust_id,
+            conversation_id=cid,
+            from_currency=request["origin"],
+            to_currency=request["destination"],
+            amount_send=quote.get("amount_send"),
+            amount_receive=quote.get("amount_receive"),
+            exchange_rate=quote.get("rate"),
+            fee=quote.get("fee", 0.0)
+        )
     # Regla del proceso: monto alto -> lo confirma un asesor (el bot no cierra solo).
-    threshold = _high_amount_threshold(tenant)
+    threshold = _high_amount_threshold()
     high = (not quote.get("error")) and bool(threshold) and float(request["amount"] or 0) >= threshold
     final = reply + ("\n\n" + _high_amount_note(language) if high else "")
-    db.add_message(tid, cid, "assistant", final)
-    observability.event("quote.completed", tenant_id=tid, conversation_id=cid,
+    db.add_message(cid, "assistant", final)
+    observability.event("quote.completed", conversation_id=cid,
                         ok=not quote.get("error"), origin=request["origin"],
                         destination=request["destination"], mode=request["mode"], high_amount=high)
     if high:
-        db.set_conversation_status(tid, cid, "handoff")
+        db.set_conversation_status(cid, "handoff")
         assigned = auth.derive_to_advisor(tid, cid)
-        observability.event("conversation.handoff", tenant_id=tid, conversation_id=cid,
+        observability.event("conversation.handoff", conversation_id=cid,
                             reason="high_amount", assigned_to=assigned)
         return {"response": final, "handoff": True, "usage": None}
     return {"response": final, "handoff": False, "usage": None}
 
 
-def _high_amount_threshold(tenant: dict) -> float | None:
+def _high_amount_threshold() -> float | None:
+    tenant = T.get_config()
     raw = (tenant.get("quote") or {}).get("high_amount_threshold")
     try:
         return float(raw) if raw not in (None, "") else None
@@ -318,18 +350,18 @@ def _high_amount_note(language: str) -> str:
 
 
 def handle_calendar(state: AgentState) -> dict[str, Any]:
-    tenant = state["tenant"]
-    history = db.get_history(tenant["id"], state["cid"], limit=12)
+    tenant = T.get_config()
+    history = db.get_history(state["cid"], limit=12)
     request = calendar_adapter.extract_request(tenant, state["text"], history)
     if request["missing"]:
         reply = calendar_adapter.missing_reply(request["missing"])
-        db.add_message(tenant["id"], state["cid"], "assistant", reply)
-        observability.event("calendar.missing_fields", tenant_id=tenant["id"], conversation_id=state["cid"], missing=request["missing"])
+        db.add_message(state["cid"], "assistant", reply)
+        observability.event("calendar.missing_fields", conversation_id=state["cid"], missing=request["missing"])
         return {"appointment_request": request, "response": reply, "handoff": False, "usage": None}
     appointment = calendar_adapter.schedule(tenant, state["cid"], state["user_ref"], request["fields"])
     reply = calendar_adapter.confirmation(appointment)
-    db.add_message(tenant["id"], state["cid"], "assistant", reply)
-    observability.event("calendar.scheduled", tenant_id=tenant["id"], conversation_id=state["cid"], appointment_id=appointment.get("id"))
+    db.add_message(state["cid"], "assistant", reply)
+    observability.event("calendar.scheduled", conversation_id=state["cid"], appointment_id=appointment.get("id"))
     return {
         "appointment_request": request,
         "appointment": appointment,
@@ -340,12 +372,12 @@ def handle_calendar(state: AgentState) -> dict[str, Any]:
 
 
 async def handle_tool(state: AgentState) -> dict[str, Any]:
-    tenant = state["tenant"]
+    tenant = T.get_config()
     request = state.get("tool_request") or {}
     if request.get("missing"):
         reply = tool_router.missing_reply(request)
-        db.add_message(tenant["id"], state["cid"], "assistant", reply)
-        observability.event("tool.missing_fields", tenant_id=tenant["id"], conversation_id=state["cid"], tool=request.get("tool"), missing=request.get("missing"))
+        db.add_message(state["cid"], "assistant", reply)
+        observability.event("tool.missing_fields", conversation_id=state["cid"], tool=request.get("tool"), missing=request.get("missing"))
         return {"response": reply, "handoff": False, "usage": None}
     result = await connectors.call_endpoint(
         tenant,
@@ -353,20 +385,20 @@ async def handle_tool(state: AgentState) -> dict[str, Any]:
         request["tool"],
         request.get("variables", {}),
     )
-    tool_router.persist_tool_result(tenant["id"], state["cid"], request, result)
-    observability.event("tool.executed", tenant_id=tenant["id"], conversation_id=state["cid"], tool=request.get("tool"), ok=result.get("ok"), status=result.get("status"))
+    tool_router.persist_tool_result(state["cid"], request, result)
+    observability.event("tool.executed", conversation_id=state["cid"], tool=request.get("tool"), ok=result.get("ok"), status=result.get("status"))
     # No redactamos aqui: el resultado se pasa al LLM (build_messages -> call_llm)
     # para una respuesta en lenguaje natural en vez de JSON crudo.
     return {"tool_result": result}
 
 
 def build_messages(state: AgentState) -> dict[str, Any]:
-    tenant = state["tenant"]
+    tenant = T.get_config()
     analysis = state.get("analysis", {})
     base_prompt = tenant.get("system_prompt", "")
     lang_line = _language_line(analysis.get("language", "es"))
     system_prompt = f"{lang_line}\n{base_prompt}" if base_prompt else lang_line
-    history = db.get_history(tenant["id"], state["cid"], limit=12)
+    history = db.get_history(state["cid"], limit=12)
     # Limpia el historial: turnos viejos del asistente pudieron ofrecer WhatsApp
     # (CTA antiguo del cotizador). Si el LLM los ve, los imita aunque el prompt lo
     # prohíba. Los saneamos ANTES de mandarlos al modelo.
@@ -405,18 +437,18 @@ def build_messages(state: AgentState) -> dict[str, Any]:
 
 
 async def call_llm(state: AgentState) -> dict[str, Any]:
-    result = await llm.chat(state["tenant"], state["messages"])
+    tenant = T.get_config()
+    result = await llm.chat(tenant, state["messages"])
     return {"llm_result": result}
 
 
 def persist_llm(state: AgentState) -> dict[str, Any]:
-    tenant = state["tenant"]
+    tenant = T.get_config()
     result = state["llm_result"]
     # Guard final: el LLM nunca deriva a un canal externo, pase lo que pase.
     content = sanitize_no_external_channels(result["content"])
-    db.add_message(tenant["id"], state["cid"], "assistant", content)
+    db.add_message(state["cid"], "assistant", content)
     db.add_usage(
-        tenant["id"],
         state["cid"],
         result["provider"],
         result["model"],
@@ -424,7 +456,7 @@ def persist_llm(state: AgentState) -> dict[str, Any]:
         result["tokens_out"],
         result["cost_usd"],
     )
-    observability.event("llm.completed", tenant_id=tenant["id"], conversation_id=state["cid"],
+    observability.event("llm.completed", conversation_id=state["cid"],
                         model=result["model"], tokens_in=result["tokens_in"],
                         tokens_out=result["tokens_out"], cost_usd=result["cost_usd"])
     return {
@@ -481,12 +513,11 @@ def graph():
     return workflow.compile()
 
 
-async def handle_message(tenant: dict, user_ref: str, text: str,
+async def handle_message(user_ref: str, text: str,
                          channel: str = "webchat",
                          conversation_id: str | None = None,
                          user_media: dict | None = None) -> dict:
     state = await graph().ainvoke({
-        "tenant": tenant,
         "user_ref": user_ref,
         "text": text,
         "channel": channel,
@@ -500,18 +531,6 @@ async def handle_message(tenant: dict, user_ref: str, text: str,
         "usage": state["usage"],
         "paused": state.get("paused", False),
         "new_lead": state.get("new_lead", False),
-        "banner": first_send_banner(tenant) if state.get("new_lead") else None,
+        "banner": state.get("banner"),
     }
 
-
-def first_send_banner(tenant: dict) -> dict | None:
-    """Banner de 'primer envío' para leads nuevos: {text, image_url?}. Configurable
-    en config.onboarding.first_send_banner; si está deshabilitado, None."""
-    cfg = (tenant.get("onboarding") or {}).get("first_send_banner") or {}
-    if cfg.get("enabled") is False:
-        return None
-    text = cfg.get("text")
-    image_url = cfg.get("image_url")
-    if not text and not image_url:
-        return None
-    return {"text": text or "", "image_url": image_url or None}

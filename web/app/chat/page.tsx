@@ -1,28 +1,24 @@
 "use client";
 import { useRef, useState } from "react";
 import { api } from "@/lib/api";
-import TenantSelect from "@/components/TenantSelect";
 import Icon from "@/components/Icon";
 
 interface Bubble { role: "user" | "assistant"; text: string; meta?: string; }
 interface ChatResp { response: string; conversation_id: string; handoff: boolean; usage: { tokens_in: number; tokens_out: number; cost_usd: number; model: string } | null; }
 
 export default function Chat() {
-  const [tenant, setTenant] = useState("");
   const [bubbles, setBubbles] = useState<Bubble[]>([]);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const convId = useRef<string | null>(null);
 
-  function onTenant(id: string) { setTenant(id); setBubbles([]); convId.current = null; }
-
   async function send() {
     const msg = text.trim();
-    if (!msg || !tenant || busy) return;
+    if (!msg || busy) return;
     setText(""); setBusy(true);
     setBubbles(b => [...b, { role: "user", text: msg }]);
     try {
-      const r = await api<ChatResp>(`/api/${tenant}/chat`, {
+      const r = await api<ChatResp>(`/api/chat`, {
         method: "POST",
         body: JSON.stringify({ message: msg, user_ref: "panel-test", conversation_id: convId.current }),
       });
@@ -37,7 +33,7 @@ export default function Chat() {
 
   return (
     <>
-      <div className="row"><label className="muted">Probar como cliente:</label><TenantSelect value={tenant} onChange={onTenant} />
+      <div className="row">
         <span className="pill live">LLM real · queda persistido y medido</span></div>
       <div className="thread" style={{ height: "calc(100vh - 200px)" }}>
         <div className="msgs">

@@ -8,8 +8,6 @@ import Icon from "./Icon";
 type NavItem = { href: string; label: string; icon: string; perm: string };
 const GROUPS: { sec: string; items: NavItem[] }[] = [
   { sec: "Operación", items: [
-    { href: "/resumen", label: "Resumen", icon: "gauge", perm: "tenants:read" },
-    { href: "/clientes", label: "Clientes", icon: "building", perm: "tenants:read" },
     { href: "/conversaciones", label: "Conversaciones", icon: "inbox", perm: "conversations:read" },
     { href: "/chat", label: "Chat de prueba", icon: "chat", perm: "chat:test" },
     { href: "/consumo", label: "Consumo", icon: "creditcard", perm: "usage:read" },

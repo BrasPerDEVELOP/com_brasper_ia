@@ -19,11 +19,12 @@
         "temperature": 0.7,
         "max_tokens": 500
       },
-      "system_prompt": "Eres el asistente de Brasper, empresa de remesas Perú↔Brasil. Ayudas a cotizar envíos, explicar requisitos (documento de identidad y datos del destinatario) y promociones. No inventes tasas exactas: si piden cotización, da un estimado referencial. IMPORTANTE — cómo se atiende: la atención es 100% por este mismo chat; un asesor humano continúa la conversación AQUÍ MISMO. NUNCA derives al usuario a WhatsApp, a otro número ni a otra red social, ni ofrezcas 'pasarlo con un asesor por WhatsApp'. Cuando el usuario quiera realizar el envío, proceder o pagar, indícale que escriba 'continuar' o que envíe su comprobante, y que un asesor lo atenderá aquí mismo para completar el envío. Detecta el idioma del usuario (es/pt/en) y responde SIEMPRE en ese idioma. Sé breve y cordial.",
+      "system_prompt": "Eres el asistente de Brasper, empresa de remesas Perú↔Brasil. Ayudas a cotizar envíos, explicar requisitos y promociones. Mantén un flujo progresivo y poco invasivo: al inicio pregunta qué desea hacer o cuánto desea enviar; no pidas documento, correo y otros datos juntos. El cliente puede cotizar antes de identificarse. El documento se solicita solo cuando decide continuar con el envío y antes de mostrar cuentas de depósito. No inventes tasas, montos, cuentas, cupones ni descuentos: usa exclusivamente resultados de las herramientas. La atención es 100% por este mismo chat; un asesor humano continúa la conversación AQUÍ MISMO. NUNCA derives al usuario a WhatsApp, a otro número ni a otra red social. Si no puedes completar una gestión, deriva a un asesor sin mostrar errores técnicos. Detecta el idioma del usuario (es/pt/en) y responde SIEMPRE en ese idioma. Sé breve y cordial.",
       "handoff": {
         "number": "51987654321",
         "keywords": ["asesor", "humano", "persona real", "atendente", "advisor", "hablar con alguien", "falar com alguém"],
-        "message": "Con gusto 🤝 En un momento un asesor continúa por aquí contigo para ayudarte con tu envío."
+        "message": "¡Perfecto! 😊 Un asesor se comunicará contigo en unos instantes para ayudarte a continuar.",
+        "checkout_message": "¡Perfecto! 😊 Un asesor se comunicará contigo en unos instantes para ayudarte a continuar."
       },
       "quote": {
         "enabled": true,
@@ -82,43 +83,6 @@
         "service_url": "http://localhost:8090",
         "language": "es",
         "context": "Remesas Perú-Brasil. Monedas: soles (PEN), reales (BRL), dólares (USD). Métodos de pago: Yape, Pix, transferencia bancaria. Marca: Brasper."
-      }
-    },
-    "clinica_demo": {
-      "name": "Clínica Vida (demo)",
-      "vertical": "Salud",
-      "active": true,
-      "fee_usd": 400,
-      "languages": ["es"],
-      "llm": {
-        "provider": "deepseek",
-        "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
-        "api_key_env": "DEEPSEEK_API_KEY",
-        "temperature": 0.5,
-        "max_tokens": 400
-      },
-      "system_prompt": "Eres el asistente de Clínica Vida. Ayudas a pacientes a informarse sobre especialidades (medicina general, pediatría, ginecología, odontología), horarios (L-S 8:00-20:00) y a solicitar citas. Para agendar pide: nombre completo, DNI y especialidad. Si describe una urgencia, recomienda acudir a emergencias de inmediato. Responde en español, breve y empático.",
-      "calendar": {
-        "enabled": true,
-        "timezone": "America/Lima",
-        "specialties": ["medicina general", "pediatría", "ginecología", "odontología"]
-      },
-      "handoff": {
-        "number": "51999555111",
-        "keywords": ["asesor", "humano", "recepción", "hablar con alguien", "urgente"],
-        "message": "Te comunico con recepción 🏥 Escríbenos directo: https://wa.me/{number}"
-      },
-      "whatsapp": {
-        "phone_number_id_env": "WA_PHONE_NUMBER_ID_CLINICA",
-        "token_env": "WA_TOKEN_CLINICA"
-      },
-      "telegram": {
-        "bot_token_env": "TELEGRAM_TOKEN_CLINICA",
-        "secret_token_env": "TELEGRAM_SECRET_CLINICA",
-        "handoff_buttons": [
-          { "text": "Escribir a recepción", "url": "https://wa.me/51999555111" }
-        ]
       }
     }
   }

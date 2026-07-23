@@ -1,7 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { api, apiBlob, Conversation, Message, MediaRef } from "@/lib/api";
-import TenantSelect from "@/components/TenantSelect";
 import Icon from "@/components/Icon";
 
 const CHAN: Record<string, { icon: string; label: string }> = {
@@ -10,16 +9,16 @@ const CHAN: Record<string, { icon: string; label: string }> = {
   webchat: { icon: "webchat", label: "Webchat" },
 };
 
-function MediaBubble({ tenant, media }: { tenant: string; media: MediaRef }) {
+function MediaBubble({ media }: { media: MediaRef }) {
   const [url, setUrl] = useState("");
   const [err, setErr] = useState(false);
   useEffect(() => {
     let alive = true; let obj = "";
-    apiBlob(`/api/${tenant}/media?provider=${encodeURIComponent(media.provider)}&ref=${encodeURIComponent(media.ref)}`)
+    apiBlob(`/api/media?provider=${encodeURIComponent(media.provider)}&ref=${encodeURIComponent(media.ref)}`)
       .then(b => { if (alive) { obj = URL.createObjectURL(b); setUrl(obj); } })
       .catch(() => { if (alive) setErr(true); });
     return () => { alive = false; if (obj) URL.revokeObjectURL(obj); };
-  }, [tenant, media.provider, media.ref]);
+  }, [media.provider, media.ref]);
   const isImg = media.kind === "image" || media.kind === "sticker" || (media.mime || "").startsWith("image/");
   if (err) return <span className="muted" style={{ fontSize: 12 }}>No se pudo cargar el adjunto</span>;
   if (!url) return <span className="muted" style={{ fontSize: 12 }}>cargando adjunto…</span>;
@@ -28,7 +27,6 @@ function MediaBubble({ tenant, media }: { tenant: string; media: MediaRef }) {
 }
 
 export default function Conversaciones() {
-  const [tenant, setTenant] = useState("");
   const [convs, setConvs] = useState<Conversation[]>([]);
   const [sel, setSel] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<Message[]>([]);
@@ -39,14 +37,13 @@ export default function Conversaciones() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   function loadConvs() {
-    if (!tenant) return;
-    api<{ conversations: Conversation[] }>(`/api/${tenant}/conversations`).then(d => setConvs(d.conversations)).catch(() => setConvs([]));
+    api<{ conversations: Conversation[] }>(`/api/conversations`).then(d => setConvs(d.conversations)).catch(() => setConvs([]));
   }
-  useEffect(() => { setSel(null); setMsgs([]); setLead({}); if (tenant) loadConvs(); }, [tenant]);
+  useEffect(() => { setSel(null); setMsgs([]); setLead({}); loadConvs(); }, []);
 
   function open(id: string) {
     setSel(id);
-    api<{ messages: Message[]; lead?: Record<string, unknown> }>(`/api/${tenant}/conversations/${id}`)
+    api<{ messages: Message[]; lead?: Record<string, unknown> }>(`/api/conversations/${id}`)
       .then(d => { setMsgs(d.messages); setLead(d.lead || {}); })
       .catch(() => { setMsgs([]); setLead({}); });
   }
@@ -54,12 +51,11 @@ export default function Conversaciones() {
   // Auto-refresco (tiempo real): sin esto había que recargar para ver mensajes nuevos.
   // Refresca la lista y el hilo abierto cada 4s. Se pausa si la pestaña no está visible.
   useEffect(() => {
-    if (!tenant) return;
     const tick = () => {
       if (typeof document !== "undefined" && document.hidden) return;
       loadConvs();
       if (sel) {
-        api<{ messages: Message[]; lead?: Record<string, unknown> }>(`/api/${tenant}/conversations/${sel}`)
+        api<{ messages: Message[]; lead?: Record<string, unknown> }>(`/api/conversations/${sel}`)
           .then(d => { setMsgs(prev => (prev.length === d.messages.length ? prev : d.messages)); setLead(d.lead || {}); })
           .catch(() => {});
       }
@@ -67,7 +63,7 @@ export default function Conversaciones() {
     const t = setInterval(tick, 4000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenant, sel]);
+  }, [sel]);
 
   // Etiquetas legibles para los datos del lead (Fase 3).
   const LEAD_LABELS: Record<string, string> = {
@@ -86,7 +82,7 @@ export default function Conversaciones() {
     if (!sel || !reply.trim()) return;
     setBusy(true);
     try {
-      await api(`/api/${tenant}/conversations/${sel}/reply`, { method: "POST", body: JSON.stringify({ text: reply.trim() }) });
+      await api(`/api/conversations/${sel}/reply`, { method: "POST", body: JSON.stringify({ text: reply.trim() }) });
       setReply("");
       open(sel); loadConvs();
     } catch (e) { alert((e as Error).message); }
@@ -96,7 +92,7 @@ export default function Conversaciones() {
     if (!sel) return;
     setBusy(true);
     try {
-      await api(`/api/${tenant}/conversations/${sel}/status`, { method: "POST", body: JSON.stringify({ status }) });
+      await api(`/api/conversations/${sel}/status`, { method: "POST", body: JSON.stringify({ status }) });
       open(sel); loadConvs();
     } catch (e) { alert((e as Error).message); }
     setBusy(false);
@@ -105,7 +101,7 @@ export default function Conversaciones() {
     if (!sel || !imgUrl.trim()) return;
     setBusy(true);
     try {
-      await api(`/api/${tenant}/conversations/${sel}/send-image`, {
+      await api(`/api/conversations/${sel}/send-image`, {
         method: "POST",
         body: JSON.stringify({ image_url: imgUrl.trim(), caption: reply.trim() || undefined }),
       });
@@ -127,7 +123,7 @@ export default function Conversaciones() {
         if (i === 0 && reply.trim()) fd.append("caption", reply.trim());
         try {
           const r = await api<{ delivery?: { sent?: boolean; detail?: string; channel?: string } }>(
-            `/api/${tenant}/conversations/${sel}/upload`, { method: "POST", body: fd });
+            `/api/conversations/${sel}/upload`, { method: "POST", body: fd });
           if (r.delivery && r.delivery.sent === false) failures.push(`${arr[i].name}: ${r.delivery.detail || "no enviado"}`);
         } catch (e) { failures.push(`${arr[i].name}: ${(e as Error).message}`); }
       }
@@ -146,7 +142,6 @@ export default function Conversaciones() {
 
   return (
     <>
-      <div className="row"><label className="muted">Cliente:</label><TenantSelect value={tenant} onChange={setTenant} /></div>
       <div className="grid2">
         <div className="list">
           {convs.length ? convs.map(c => (
@@ -198,7 +193,7 @@ export default function Conversaciones() {
           <div className="msgs" style={{ flex: 1 }}>
             {sel ? msgs.map((m, i) => (
               <div key={i} className={"msg " + (m.role === "user" ? "user" : "assistant")}>
-                {m.media ? <div style={{ marginBottom: m.content ? 4 : 0 }}><MediaBubble tenant={tenant} media={m.media} /></div> : null}
+                {m.media ? <div style={{ marginBottom: m.content ? 4 : 0 }}><MediaBubble media={m.media} /></div> : null}
                 {m.content}
                 {m.created_at && <small>{m.created_at.replace("T", " ").slice(0, 16)}</small>}
               </div>

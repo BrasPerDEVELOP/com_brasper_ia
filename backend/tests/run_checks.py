@@ -1004,32 +1004,134 @@ def case_checkout_handoff():
 
 
 def case_client_onboarding_without_transaction():
-    """WhatsApp captura identidad, hace upsert del cliente y jamás registra operación."""
+    """Cotiza primero y pide documento solo al confirmar el envío."""
     tenant = T.get_tenant("brasper")
-    saved_upsert = brasper_api.upsert_client
+    saved_upsert, saved_find, saved_accounts = (
+        brasper_api.upsert_client, brasper_api.find_client, brasper_api.deposit_accounts)
     calls = []
+    brasper_api.find_client = lambda *args, **kwargs: {"ok": True, "data": None, "ambiguous": False}
     brasper_api.upsert_client = lambda tenant_arg, lead: (
         calls.append(dict(lead)), {"ok": True, "data": {"id": "client-uuid", "created": True}}
     )[1]
+    brasper_api.deposit_accounts = lambda *args, **kwargs: {"ok": True, "data": [{
+        "id": "bank-1", "bank": "Banco Oficial", "company": "Brasper SAC", "account": "000-111"
+    }]}
     try:
         assert not hasattr(brasper_api, "register_operation"), "la IA no debe exponer creación de operaciones"
         out = _run(engine.handle_message(tenant, "wa:51999111222", "hola", channel="whatsapp"))
         cid = out["conversation_id"]
-        assert "nombres" in out["response"].lower(), out
-        for answer in ("Ana María", "Pérez Soto", "DNI", "12345678"):
+        assert "nombre completo" in out["response"].lower(), out
+        out = _run(engine.handle_message(
+            tenant, "wa:51999111222", "Ana María Pérez Soto", channel="whatsapp", conversation_id=cid
+        ))
+        assert "cuánto" in out["response"].lower(), out
+
+        # La cotización no exige DNI/correo y no queda atrapada en onboarding.
+        out = _run(engine.handle_message(
+            tenant, "wa:51999111222", "Cotizar 500 PEN a BRL", channel="whatsapp", conversation_id=cid
+        ))
+        assert "cotización" in out["response"].lower() and "documento" not in out["response"].lower(), out
+
+        out = _run(engine.handle_message(
+            tenant, "wa:51999111222", "continuar", channel="whatsapp", conversation_id=cid
+        ))
+        assert "tipo de documento" in out["response"].lower(), out
+        for answer in ("DNI", "12345678"):
             out = _run(engine.handle_message(
                 tenant, "wa:51999111222", answer, channel="whatsapp", conversation_id=cid
             ))
-        assert "correo" in out["response"].lower(), out
-        out = _run(engine.handle_message(
-            tenant, "wa:51999111222", "omitir", channel="whatsapp", conversation_id=cid
-        ))
         lead = db.get_lead_data("brasper", cid)
         assert lead["brasper_user_id"] == "client-uuid" and lead["telefono"] == "999111222", lead
         assert lead["numero_documento"] == "12345678" and calls, lead
+        assert "Banco Oficial" in out["response"] and "correo" not in out["response"].lower(), out
         assert "transacci" not in out["response"].lower(), out
     finally:
-        brasper_api.upsert_client = saved_upsert
+        brasper_api.upsert_client, brasper_api.find_client, brasper_api.deposit_accounts = (
+            saved_upsert, saved_find, saved_accounts)
+
+
+def case_returning_client_by_phone():
+    """WhatsApp reconoce al cliente por teléfono y no vuelve a pedir sus datos."""
+    tenant = T.get_tenant("brasper")
+    saved_find = brasper_api.find_client
+    brasper_api.find_client = lambda *args, **kwargs: {"ok": True, "data": {
+        "id": "client-existing", "names": "Carlos", "lastnames": "García",
+        "phone": 999222333, "code_phone": "+51", "document_type": "dni",
+        "document_number": "87654321",
+    }}
+    try:
+        out = _run(engine.handle_message(
+            tenant, "wa:51999222333", "hola", channel="whatsapp"
+        ))
+        lead = db.get_lead_data("brasper", out["conversation_id"])
+        assert "Carlos" in out["response"] and "nuevamente" in out["response"], out
+        assert lead.get("brasper_user_id") == "client-existing", lead
+        assert "documento" not in out["response"].lower(), out
+    finally:
+        brasper_api.find_client = saved_find
+
+
+def case_deposit_failure_creates_handoff():
+    """Una falla de cuentas se oculta al cliente y deriva realmente al asesor."""
+    auth_mod.ensure_seed()
+    tenant = T.get_tenant("brasper")
+    cid = db.get_or_create_conversation("brasper", "deposit-failure", "webchat")
+    db.merge_lead_data("brasper", cid, {
+        "brasper_user_id": "client-1", "ruta": "PEN->BRL", "commercial_stage": "quoted"
+    })
+    saved = brasper_api.deposit_accounts
+    brasper_api.deposit_accounts = lambda *args, **kwargs: {"ok": False, "error": "timeout"}
+    try:
+        out = _run(engine.handle_message(
+            tenant, "deposit-failure", "continuar", conversation_id=cid
+        ))
+    finally:
+        brasper_api.deposit_accounts = saved
+    assert out["handoff"] is True, out
+    assert "asesor se comunicará" in out["response"].lower(), out
+    assert "consultar" not in out["response"].lower() and "timeout" not in out["response"].lower(), out
+    assert db.conversation_status("brasper", cid) == "handoff"
+
+
+def case_private_brasper_ai_contracts():
+    """Clientes y cuentas usan solo endpoints IA privados, nunca listados globales."""
+    tenant = T.get_tenant("brasper")
+    saved = brasper_api._integration_request
+    calls = []
+
+    def fake_request(_tenant, method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        if path.endswith("/lookup"):
+            return {"ok": True, "data": {"found": True, "ambiguous": False, "client": {
+                "id": "client-secure", "names": "Ana", "lastnames": "Pérez",
+                "document_verified": True, "is_first_transfer": False,
+            }}}
+        if path.endswith("/upsert"):
+            return {"ok": True, "data": {"id": "client-secure", "created": False,
+                                           "is_first_transfer": False}}
+        return {"ok": True, "data": []}
+
+    brasper_api._integration_request = fake_request
+    try:
+        found = brasper_api.find_client(
+            tenant, phone="999111222", code_phone="+51")
+        assert found["data"]["id"] == "client-secure", found
+        upserted = brasper_api.upsert_client(tenant, {
+            "nombres": "Ana", "apellidos": "Pérez", "tipo_documento": "dni",
+            "numero_documento": "12345678", "codigo_telefono": "+51", "telefono": "999111222",
+        })
+        assert upserted["ok"] is True, upserted
+        brasper_api.deposit_accounts(tenant, "PEN")
+    finally:
+        brasper_api._integration_request = saved
+
+    paths = [item[1] for item in calls]
+    assert paths == [
+        "/brasper/ai/clients/lookup",
+        "/brasper/ai/clients/upsert",
+        "/brasper/ai/deposit-accounts",
+    ], paths
+    assert all("/user/" not in path for path in paths), paths
 
 
 def case_no_external_channel_guard():
@@ -1165,14 +1267,21 @@ def case_brasper_api_live_quote():
 
 
 def case_new_lead_and_banner():
-    """Lead nuevo (primer mensaje) -> new_lead=True + banner de primer envío; luego no."""
+    """La promo de primer envío aparece solo tras verificar que no existe el cliente."""
     tenant = T.get_tenant("brasper")
-    out = _run(engine.handle_message(tenant, "lead-nuevo-xyz", "hola"))
-    assert out["new_lead"] is True, out
-    assert out.get("banner") and "primer envío" in (out["banner"]["text"] or "").lower(), out.get("banner")
-    out2 = _run(engine.handle_message(tenant, "lead-nuevo-xyz", "otra cosa mas"))
-    assert out2["new_lead"] is False, out2
-    assert out2.get("banner") is None, out2
+    saved_find = brasper_api.find_client
+    brasper_api.find_client = lambda *args, **kwargs: {"ok": True, "data": None, "ambiguous": False}
+    try:
+        out = _run(engine.handle_message(tenant, "lead-nuevo-xyz", "hola"))
+        assert out["new_lead"] is True and out.get("banner") is None, out
+        assert "nombre completo" in out["response"].lower(), out
+        out2 = _run(engine.handle_message(
+            tenant, "lead-nuevo-xyz", "Ana Pérez", conversation_id=out["conversation_id"]
+        ))
+        assert out2["new_lead"] is False, out2
+        assert out2.get("banner") and "primer envío" in (out2["banner"]["text"] or "").lower(), out2
+    finally:
+        brasper_api.find_client = saved_find
 
 
 def case_lead_data_capture():
@@ -1314,6 +1423,9 @@ def main() -> int:
     check("41. Datos del lead estructurados (idioma/ruta/monto/TC)", case_lead_data_capture)
     check("42. Reglas: vigencia TC 20min + monto alto deriva a asesor", case_quote_business_rules)
     check("43. Onboarding: crea/actualiza cliente sin transaccion", case_client_onboarding_without_transaction)
+    check("44. Cliente recurrente: reconocimiento por telefono", case_returning_client_by_phone)
+    check("45. Cuentas no disponibles: handoff real sin error tecnico", case_deposit_failure_creates_handoff)
+    check("46. Integracion Brasper: solo endpoints IA privados", case_private_brasper_ai_contracts)
 
     print("=" * 60)
     print("GATE PRODUCCION — verificacion (sin pytest, sin LLM real)")

@@ -16,24 +16,7 @@ router = APIRouter()
 _PLAIN_SECRET_KEYS = {"api_key", "token", "bot_token", "secret_token"}
 
 
-def _tenant_or_404(tenant_id: str) -> dict:
-    t = T.get_tenant(tenant_id)
-    if not t:
-        raise HTTPException(status_code=404, detail=f"Tenant '{tenant_id}' no existe o está inactivo")
-    return t
 
-
-def _assert_tenant_access(user: dict, tenant_id: str) -> None:
-    scope = user.get("tenant_scope")
-    if scope and scope != tenant_id:
-        raise HTTPException(status_code=403, detail="Usuario sin acceso a este tenant")
-
-
-def _visible_tenant_ids(user: dict) -> list[str]:
-    scope = user.get("tenant_scope")
-    if scope:
-        return [scope] if T.get_tenant(scope) else []
-    return list(T.all_tenants().keys())
 
 
 _is_production = util.is_production  # helper único, ver core/util.py
@@ -105,12 +88,11 @@ class ChatIn(BaseModel):
     conversation_id: str | None = None
 
 
-@router.post("/api/{tenant_id}/chat")
-async def chat(tenant_id: str, body: ChatIn, request: Request,
+@router.post("/api/chat")
+async def chat(body: ChatIn, request: Request,
                user: dict = Depends(auth.require("chat:test"))):
     rate_limit.check(request, "chat", limit=60)
-    _assert_tenant_access(user, tenant_id)
-    tenant = _tenant_or_404(tenant_id)
+    tenant = T.get_config()
     if not body.message.strip():
         raise HTTPException(status_code=422, detail="Mensaje vacío")
     try:
@@ -145,7 +127,7 @@ async def consulta_webchat(body: WebChatIn, request: Request,
     if not body.message.strip():
         raise HTTPException(status_code=422, detail="Mensaje vacío")
     session_id = (conversation_id or body.session_id or "webchat").strip() or "webchat"
-    tenant = _tenant_or_404(os.getenv("WEBCHAT_TENANT", "brasper"))
+    tenant = T.get_config()
     try:
         out = await engine.handle_message(tenant, f"webchat:{session_id}", body.message.strip(),
                                           channel="webchat", conversation_id=session_id)
@@ -296,10 +278,9 @@ def tenants_overview(user: dict = Depends(auth.require("tenants:read"))):
     """Clientes con consumo/costo REAL (desde usage_events) + fee + margen."""
     usage = {u["tenant_id"]: u for u in db.usage_summary()}
     out = []
-    for tid in _visible_tenant_ids(user):
-        t = T.get_tenant(tid)
-        if not t:
-            continue
+    t = T.get_config()
+    if t:
+        tid = t["id"]
         u = usage.get(tid, {})
         cost = round(u.get("cost_usd") or 0, 6)
         fee = t.get("fee_usd", 0)
@@ -344,11 +325,9 @@ def admin_tenants_list(user: dict = Depends(auth.require("tenants:read"))):
     }
 
 
-@router.get("/api/admin/tenants/{tenant_id}/quote-rates")
-def admin_tenant_quote_rates(tenant_id: str,
-                             user: dict = Depends(auth.require("tenants:read"))):
-    _assert_tenant_access(user, tenant_id)
-    tenant = _tenant_or_404(tenant_id)
+@router.get("/api/admin/tenants/quote-rates")
+def admin_tenant_quote_rates(user: dict = Depends(auth.require("tenants:read"))):
+    tenant = T.get_config()
     if not brasper_api.enabled(tenant):
         raise HTTPException(status_code=409, detail="La API de cotización no está activa para este cliente")
     rates = brasper_api.live_rates(tenant)
@@ -374,11 +353,11 @@ def admin_tenants_create(body: TenantCreateIn,
     return {"tenant": tenant}
 
 
-@router.patch("/api/admin/tenants/{tenant_id}")
-def admin_tenants_patch(tenant_id: str, body: TenantPatchIn,
+@router.patch("/api/admin/tenants")
+def admin_tenants_patch(body: TenantPatchIn,
                         user: dict = Depends(auth.require("tenants:write"))):
     _reject_plain_secrets(body.config)
-    tenant = _write_tenant_or_error(T.patch_tenant_config, tenant_id, body.config)
+    tenant = _write_tenant_or_error(T.patch_tenant_config, T.get_config()["id"], body.config)
     db.add_audit_event(
         tenant["id"], user.get("email"), "tenant.patch", f"tenant:{tenant['id']}",
         {"keys": sorted(body.config.keys())},
@@ -387,26 +366,26 @@ def admin_tenants_patch(tenant_id: str, body: TenantPatchIn,
     return {"tenant": tenant}
 
 
-@router.post("/api/admin/tenants/{tenant_id}/pause")
-def admin_tenants_pause(tenant_id: str, user: dict = Depends(auth.require("tenants:write"))):
-    tenant = _write_tenant_or_error(T.set_tenant_active, tenant_id, False)
+@router.post("/api/admin/tenants/pause")
+def admin_tenants_pause(user: dict = Depends(auth.require("tenants:write"))):
+    tenant = _write_tenant_or_error(T.set_tenant_active, T.get_config()["id"], False)
     db.add_audit_event(tenant["id"], user.get("email"), "tenant.pause", f"tenant:{tenant['id']}")
     _enqueue_tenant_changed(tenant["id"], user.get("email"), "tenant.pause")
     return {"tenant": tenant}
 
 
-@router.post("/api/admin/tenants/{tenant_id}/resume")
-def admin_tenants_resume(tenant_id: str, user: dict = Depends(auth.require("tenants:write"))):
-    tenant = _write_tenant_or_error(T.set_tenant_active, tenant_id, True)
+@router.post("/api/admin/tenants/resume")
+def admin_tenants_resume(user: dict = Depends(auth.require("tenants:write"))):
+    tenant = _write_tenant_or_error(T.set_tenant_active, T.get_config()["id"], True)
     db.add_audit_event(tenant["id"], user.get("email"), "tenant.resume", f"tenant:{tenant['id']}")
     _enqueue_tenant_changed(tenant["id"], user.get("email"), "tenant.resume")
     return {"tenant": tenant}
 
 
-@router.post("/api/admin/tenants/{tenant_id}/secrets")
-def admin_tenants_secret_refs(tenant_id: str, body: TenantSecretRefsIn,
+@router.post("/api/admin/tenants/secrets")
+def admin_tenants_secret_refs(body: TenantSecretRefsIn,
                               user: dict = Depends(auth.require("tenants:write"))):
-    tenant = _write_tenant_or_error(T.set_secret_refs, tenant_id, body.refs)
+    tenant = _write_tenant_or_error(T.set_secret_refs, T.get_config()["id"], body.refs)
     for path, env_name in body.refs.items():
         db.add_secret_rotation(tenant["id"], user.get("email"), path, env_name, body.note)
     db.add_audit_event(
@@ -417,19 +396,19 @@ def admin_tenants_secret_refs(tenant_id: str, body: TenantSecretRefsIn,
     return {"tenant": tenant}
 
 
-@router.get("/api/admin/tenants/{tenant_id}/secrets/rotations")
-def admin_tenants_secret_rotations(tenant_id: str, limit: int = 100,
+@router.get("/api/admin/tenants/secrets/rotations")
+def admin_tenants_secret_rotations(limit: int = 100,
                                    user: dict = Depends(auth.require("config:read"))):
-    _tenant_or_404(tenant_id)
-    return {"rotations": db.list_secret_rotations(tenant_id, limit)}
+    tenant = T.get_config()
+    return {"rotations": db.list_secret_rotations(tenant["id"], limit)}
 
 
-@router.get("/api/admin/tenants/{tenant_id}/usage")
-def admin_tenants_usage(tenant_id: str, limit: int = 100,
+@router.get("/api/admin/tenants/usage")
+def admin_tenants_usage(limit: int = 100,
                         user: dict = Depends(auth.require("usage:read"))):
-    _tenant_or_404(tenant_id)
-    return {"summary": db.usage_summary(tenant_id),
-            "events": db.usage_events(tenant_id, limit)}
+    tenant = T.get_config()
+    return {"summary": db.usage_summary(tenant["id"]),
+            "events": db.usage_events(tenant["id"], limit)}
 
 
 def _is_agent(user: dict) -> bool:
@@ -445,11 +424,10 @@ def _assert_conversation_access(user: dict, conv: dict) -> None:
             raise HTTPException(status_code=403, detail="Conversación asignada a otro asesor")
 
 
-@router.get("/api/{tenant_id}/conversations")
-def conversations(tenant_id: str,
-                  user: dict = Depends(auth.require("conversations:read"))):
-    _assert_tenant_access(user, tenant_id)
-    _tenant_or_404(tenant_id)
+@router.get("/api/conversations")
+def conversations(user: dict = Depends(auth.require("conversations:read"))):
+    tenant = T.get_config()
+    tenant_id = tenant["id"]
     if _is_agent(user):
         # El asesor ve sus conversaciones + las libres (cola por reclamar), no las de otros.
         convs = db.list_conversations(tenant_id, assigned_to=user.get("email"), include_unassigned=True)
@@ -458,11 +436,11 @@ def conversations(tenant_id: str,
     return {"conversations": convs}
 
 
-@router.get("/api/{tenant_id}/conversations/{conversation_id}")
-def conversation_messages(tenant_id: str, conversation_id: str,
+@router.get("/api/conversations/{conversation_id}")
+def conversation_messages(conversation_id: str,
                           user: dict = Depends(auth.require("conversations:read"))):
-    _assert_tenant_access(user, tenant_id)
-    _tenant_or_404(tenant_id)
+    tenant = T.get_config()
+    tenant_id = tenant["id"]
     conv = db.get_conversation(tenant_id, conversation_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada para este tenant")
@@ -474,13 +452,12 @@ def conversation_messages(tenant_id: str, conversation_id: str,
             "status": conv.get("status"), "assigned_to": conv.get("assigned_to")}
 
 
-@router.get("/api/{tenant_id}/media")
-async def media_proxy(tenant_id: str, provider: str, ref: str,
+@router.get("/api/media")
+async def media_proxy(provider: str, ref: str,
                       user: dict = Depends(auth.require("conversations:read"))):
     """Proxy de descarga de un adjunto entrante (imagen/archivo) para verlo en el
     panel, sin exponer los tokens del canal al navegador."""
-    _assert_tenant_access(user, tenant_id)
-    tenant = _tenant_or_404(tenant_id)
+    tenant = T.get_config()
     if provider == "telegram":
         content, mime = await telegram.download_file(tenant, ref)
     elif provider == "whatsapp":
@@ -497,20 +474,19 @@ class AssignIn(BaseModel):
     email: str | None = None   # None = desasignar
 
 
-@router.get("/api/{tenant_id}/advisors")
-def advisors_list(tenant_id: str,
-                  user: dict = Depends(auth.require("conversations:read"))):
-    _assert_tenant_access(user, tenant_id)
-    _tenant_or_404(tenant_id)
+@router.get("/api/advisors")
+def advisors_list(user: dict = Depends(auth.require("conversations:read"))):
+    tenant = T.get_config()
+    tenant_id = tenant["id"]
     return {"advisors": [auth._public_user(u) for u in auth.list_advisors(tenant_id)],
             "load": db.handoff_load_by_agent(tenant_id)}
 
 
-@router.post("/api/{tenant_id}/conversations/{conversation_id}/assign")
-def conversation_assign(tenant_id: str, conversation_id: str, body: AssignIn,
+@router.post("/api/conversations/{conversation_id}/assign")
+def conversation_assign(conversation_id: str, body: AssignIn,
                         user: dict = Depends(auth.require("conversations:write"))):
-    _assert_tenant_access(user, tenant_id)
-    _tenant_or_404(tenant_id)
+    tenant = T.get_config()
+    tenant_id = tenant["id"]
     email = (body.email or "").strip().lower() or None
     if email and not auth.user_from_email(email):
         raise HTTPException(status_code=422, detail=f"Usuario '{email}' no existe en el panel")
@@ -547,13 +523,13 @@ async def _deliver_to_user(tenant: dict, conv: dict, text: str) -> dict:
     return {"sent": False, "channel": channel or "webchat", "reason": "canal sin envío push"}
 
 
-@router.post("/api/{tenant_id}/conversations/{conversation_id}/reply")
-async def conversation_reply(tenant_id: str, conversation_id: str, body: ReplyIn,
+@router.post("/api/conversations/{conversation_id}/reply")
+async def conversation_reply(conversation_id: str, body: ReplyIn,
                              user: dict = Depends(auth.require("conversations:write"))):
     """El asesor escribe al usuario A TRAVÉS del bot (mismo chat). Pausa implícita:
     guarda el mensaje y lo entrega por el canal; el bot no interfiere en handoff."""
-    _assert_tenant_access(user, tenant_id)
-    tenant = _tenant_or_404(tenant_id)
+    tenant = T.get_config()
+    tenant_id = tenant["id"]
     text = (body.text or "").strip()
     if not text:
         raise HTTPException(status_code=422, detail="Mensaje vacío")
@@ -579,13 +555,13 @@ class ImageIn(BaseModel):
     caption: str | None = None
 
 
-@router.post("/api/{tenant_id}/conversations/{conversation_id}/send-image")
-async def conversation_send_image(tenant_id: str, conversation_id: str, body: ImageIn,
+@router.post("/api/conversations/{conversation_id}/send-image")
+async def conversation_send_image(conversation_id: str, body: ImageIn,
                                   user: dict = Depends(auth.require("conversations:write"))):
     """El asesor envía una IMAGEN al usuario por su canal (Telegram sendPhoto /
     WhatsApp image). `image_url` debe ser una URL pública http(s)."""
-    _assert_tenant_access(user, tenant_id)
-    tenant = _tenant_or_404(tenant_id)
+    tenant = T.get_config()
+    tenant_id = tenant["id"]
     url = (body.image_url or "").strip()
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=422, detail="image_url debe ser una URL http(s) pública")
@@ -629,14 +605,14 @@ async def conversation_send_image(tenant_id: str, conversation_id: str, body: Im
 _MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB (foto Telegram; WhatsApp imagen exige <=5 MB)
 
 
-@router.post("/api/{tenant_id}/conversations/{conversation_id}/upload")
-async def conversation_upload(tenant_id: str, conversation_id: str,
+@router.post("/api/conversations/{conversation_id}/upload")
+async def conversation_upload(conversation_id: str,
                               file: UploadFile = File(...), caption: str = Form(""),
                               user: dict = Depends(auth.require("conversations:write"))):
     """El asesor SUBE un archivo (imagen/PDF) y se envía al usuario por su canal:
     Telegram por multipart (sendPhoto/sendDocument), WhatsApp subiendo a /media."""
-    _assert_tenant_access(user, tenant_id)
-    tenant = _tenant_or_404(tenant_id)
+    tenant = T.get_config()
+    tenant_id = tenant["id"]
     conv = db.get_conversation(tenant_id, conversation_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
@@ -687,12 +663,12 @@ async def conversation_upload(tenant_id: str, conversation_id: str,
     return {"conversation_id": conversation_id, "filename": fname, "delivery": delivery}
 
 
-@router.post("/api/{tenant_id}/conversations/{conversation_id}/status")
-def conversation_status(tenant_id: str, conversation_id: str, body: StatusIn,
+@router.post("/api/conversations/{conversation_id}/status")
+def conversation_status(conversation_id: str, body: StatusIn,
                         user: dict = Depends(auth.require("conversations:write"))):
     """Tomar (handoff = pausa el bot), devolver al bot (active) o cerrar (closed)."""
-    _assert_tenant_access(user, tenant_id)
-    _tenant_or_404(tenant_id)
+    tenant = T.get_config()
+    tenant_id = tenant["id"]
     status = (body.status or "").strip().lower()
     if status not in {"handoff", "active", "closed"}:
         raise HTTPException(status_code=422, detail="status debe ser handoff | active | closed")
@@ -710,30 +686,27 @@ def conversation_status(tenant_id: str, conversation_id: str, body: StatusIn,
     return {"conversation_id": conversation_id, "status": status}
 
 
-@router.get("/api/{tenant_id}/export")
-def export_tenant(tenant_id: str, limit: int = 500,
+@router.get("/api/export")
+def export_tenant(limit: int = 500,
                   user: dict = Depends(auth.require("conversations:read"))):
     """Exporta conversaciones + mensajes del tenant (portabilidad / offboarding)."""
-    _assert_tenant_access(user, tenant_id)
-    _tenant_or_404(tenant_id)
+    tenant = T.get_config()
+    tenant_id = tenant["id"]
     return {"tenant_id": tenant_id, "conversations": db.export_conversations(tenant_id, limit)}
 
 
-@router.get("/api/{tenant_id}/appointments")
-def appointments(tenant_id: str, limit: int = 100,
+@router.get("/api/appointments")
+def appointments(limit: int = 100,
                  user: dict = Depends(auth.require("conversations:read"))):
-    _assert_tenant_access(user, tenant_id)
-    _tenant_or_404(tenant_id)
+    tenant = T.get_config()
+    tenant_id = tenant["id"]
     return {"appointments": db.list_appointments(tenant_id, limit)}
 
 
 @router.get("/api/usage")
-def usage(tenant_id: str | None = None, limit: int = 100,
+def usage(limit: int = 100,
           user: dict = Depends(auth.require("usage:read"))):
-    if user.get("tenant_scope"):
-        if tenant_id and tenant_id != user["tenant_scope"]:
-            raise HTTPException(status_code=403, detail="Usuario sin acceso a este tenant")
-        tenant_id = user["tenant_scope"]
+    tenant_id = T.get_config()["id"]
     return {"summary": db.usage_summary(tenant_id),
             "events": db.usage_events(tenant_id, limit)}
 
@@ -755,11 +728,9 @@ def ops_dead_letter(limit: int = 100, user: dict = Depends(auth.require("usage:r
 
 
 @router.get("/api/ops/usage-daily")
-def ops_usage_daily(tenant_id: str | None = None,
-                    user: dict = Depends(auth.require("usage:read"))):
+def ops_usage_daily(user: dict = Depends(auth.require("usage:read"))):
     """Agregación de consumo/costo por día y tenant."""
-    if user.get("tenant_scope"):
-        tenant_id = user["tenant_scope"]
+    tenant_id = T.get_config()["id"]
     return {"daily": db.usage_daily(tenant_id)}
 
 
@@ -790,20 +761,17 @@ class ConnectorTestIn(BaseModel):
     variables: dict = {}
 
 
-@router.get("/api/{tenant_id}/connectors")
-def connectors_list(tenant_id: str,
-                    user: dict = Depends(auth.require("config:read"))):
-    _assert_tenant_access(user, tenant_id)
-    tenant = _tenant_or_404(tenant_id)
+@router.get("/api/connectors")
+def connectors_list(user: dict = Depends(auth.require("config:read"))):
+    tenant = T.get_config()
     return {"connectors": connectors.list_connectors(tenant)}
 
 
-@router.post("/api/{tenant_id}/connectors/{connector_key}/{tool}/test")
-async def connectors_test(tenant_id: str, connector_key: str, tool: str,
+@router.post("/api/connectors/{connector_key}/{tool}/test")
+async def connectors_test(connector_key: str, tool: str,
                           body: ConnectorTestIn,
                           user: dict = Depends(auth.require("config:write"))):
-    _assert_tenant_access(user, tenant_id)
-    tenant = _tenant_or_404(tenant_id)
+    tenant = T.get_config()
     return await connectors.call_endpoint(tenant, connector_key, tool, body.variables)
 
 
@@ -815,19 +783,16 @@ class TemplateSendIn(BaseModel):
     language: str | None = None
 
 
-@router.get("/api/{tenant_id}/templates")
-def templates_list(tenant_id: str,
-                   user: dict = Depends(auth.require("config:read"))):
-    _assert_tenant_access(user, tenant_id)
-    tenant = _tenant_or_404(tenant_id)
+@router.get("/api/templates")
+def templates_list(user: dict = Depends(auth.require("config:read"))):
+    tenant = T.get_config()
     return {"templates": wa_templates.list_templates(tenant)}
 
 
-@router.post("/api/{tenant_id}/templates/send")
-async def templates_send(tenant_id: str, body: TemplateSendIn,
+@router.post("/api/templates/send")
+async def templates_send(body: TemplateSendIn,
                          user: dict = Depends(auth.require("config:write"))):
-    _assert_tenant_access(user, tenant_id)
-    tenant = _tenant_or_404(tenant_id)
+    tenant = T.get_config()
     if not body.to.strip() or not body.template_name.strip():
         raise HTTPException(status_code=422, detail="Faltan 'to' o 'template_name'")
     return await wa_templates.send_template(
@@ -837,10 +802,10 @@ async def templates_send(tenant_id: str, body: TemplateSendIn,
 
 
 # ---------- webhook Telegram (multi-tenant por URL /telegram/webhook/{tenant_id}) ----------
-@router.post("/telegram/webhook/{tenant_id}")
-async def telegram_webhook(tenant_id: str, request: Request):
+@router.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
     rate_limit.check(request, "telegram_webhook", limit=240)
-    tenant = _tenant_or_404(tenant_id)
+    tenant = T.get_config()
     secret = T.telegram_secret(tenant)
     if _is_production() and not secret:
         raise HTTPException(status_code=503, detail="Telegram secret token no configurado")
@@ -870,27 +835,22 @@ class TgWebhookIn(BaseModel):
     base_url: str
 
 
-@router.post("/api/{tenant_id}/telegram/set-webhook")
-async def telegram_set_webhook(tenant_id: str, body: TgWebhookIn,
+@router.post("/api/telegram/set-webhook")
+async def telegram_set_webhook(body: TgWebhookIn,
                                user: dict = Depends(auth.require("config:write"))):
-    _assert_tenant_access(user, tenant_id)
-    tenant = _tenant_or_404(tenant_id)
+    tenant = T.get_config()
     if not body.base_url.strip():
         raise HTTPException(status_code=422, detail="Falta 'base_url' (URL pública HTTPS)")
     return await telegram.set_webhook(tenant, body.base_url.strip())
 
 
-@router.post("/api/{tenant_id}/telegram/delete-webhook")
-async def telegram_delete_webhook(tenant_id: str,
-                                  user: dict = Depends(auth.require("config:write"))):
-    _assert_tenant_access(user, tenant_id)
-    return await telegram.delete_webhook(_tenant_or_404(tenant_id))
+@router.post("/api/telegram/delete-webhook")
+async def telegram_delete_webhook(user: dict = Depends(auth.require("config:write"))):
+    return await telegram.delete_webhook(T.get_config())
 
 
-@router.get("/api/{tenant_id}/telegram/info")
-async def telegram_info(tenant_id: str,
-                        user: dict = Depends(auth.require("config:read"))):
-    _assert_tenant_access(user, tenant_id)
-    tenant = _tenant_or_404(tenant_id)
+@router.get("/api/telegram/info")
+async def telegram_info(user: dict = Depends(auth.require("config:read"))):
+    tenant = T.get_config()
     return {"getMe": await telegram.get_me(tenant),
             "webhook": await telegram.get_webhook_info(tenant)}

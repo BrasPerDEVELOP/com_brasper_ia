@@ -1,7 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import TenantSelect from "@/components/TenantSelect";
 
 /* Configuración del bot por cliente: prompt, LLM, handoff y cotizador.
    Guarda vía PATCH /api/admin/tenants/{id} (deep-merge en el backend). */
@@ -23,7 +22,6 @@ type AdminTenant = {
 type LiveRate = { origin: string; destination: string; pair: string; rate: number; updated_at?: string | null };
 
 export default function BotConfig() {
-  const [tenant, setTenant] = useState("");
   const [cfg, setCfg] = useState<AdminTenant | null>(null);
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -31,20 +29,18 @@ export default function BotConfig() {
   const [ratesNote, setRatesNote] = useState("Cargando tasas de Brasper…");
 
   useEffect(() => {
-    if (!tenant) return;
     setNote(null);
     api<{ tenants: AdminTenant[] }>("/api/admin/tenants")
       .then(d => {
-        const t = d.tenants.find(x => x.id === tenant) || null;
-        setCfg(t);
+        setCfg(d.tenants[0] || null);
       })
       .catch(e => setNote({ ok: false, text: (e as Error).message }));
     setLiveRates([]);
     setRatesNote("Cargando tasas de Brasper…");
-    api<{ source: string; rates: LiveRate[] }>(`/api/admin/tenants/${tenant}/quote-rates`)
+    api<{ source: string; rates: LiveRate[] }>(`/api/admin/quote-rates`)
       .then(d => { setLiveRates(d.rates); setRatesNote(`Fuente: ${d.source}`); })
       .catch(e => setRatesNote(`No se pudieron cargar las tasas: ${(e as Error).message}`));
-  }, [tenant]);
+  }, []);
 
   function set<K extends keyof AdminTenant>(key: K, value: AdminTenant[K]) {
     setCfg(c => (c ? { ...c, [key]: value } : c));
@@ -65,7 +61,7 @@ export default function BotConfig() {
       },
     };
     try {
-      await api(`/api/admin/tenants/${tenant}`, { method: "PATCH", body: JSON.stringify(body) });
+      await api(`/api/admin/tenant`, { method: "PATCH", body: JSON.stringify(body) });
       setNote({ ok: true, text: "Guardado. El bot ya responde con esta configuración." });
     } catch (e) { setNote({ ok: false, text: (e as Error).message }); }
     setSaving(false);
@@ -73,12 +69,12 @@ export default function BotConfig() {
 
   return (
     <>
-      <div className="row"><label className="muted">Cliente:</label><TenantSelect value={tenant} onChange={setTenant} />
+      <div className="row">
         <span className="grow" />
         <button className="btn" onClick={save} disabled={saving || !cfg}>{saving ? "Guardando…" : "Guardar cambios"}</button>
       </div>
       {note && <div className="usage-note" style={!note.ok ? { background: "#fdecec", color: "#8f1d1d" } : undefined}>{note.text}</div>}
-      {!cfg ? <div className="empty">Selecciona un cliente.</div> : (
+      {!cfg ? <div className="empty">Cargando configuración...</div> : (
         <div className="cards" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))" }}>
           <div className="card">
             <h3>Prompt del sistema</h3>

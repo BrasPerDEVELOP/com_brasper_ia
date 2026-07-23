@@ -1,17 +1,14 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api, Template } from "@/lib/api";
-import TenantSelect from "@/components/TenantSelect";
 
 export default function Plantillas() {
-  const [tenant, setTenant] = useState("");
   const [tpls, setTpls] = useState<Template[]>([]);
   const [form, setForm] = useState({ to: "", template_name: "", params: "", language: "" });
   const [out, setOut] = useState("");
   useEffect(() => {
-    if (!tenant) return;
-    api<{ templates: Template[] }>(`/api/${tenant}/templates`).then(d => setTpls(d.templates)).catch(() => setTpls([]));
-  }, [tenant]);
+    api<{ templates: Template[] }>(`/api/templates`).then(d => setTpls(d.templates)).catch(() => setTpls([]));
+  }, []);
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
@@ -19,7 +16,7 @@ export default function Plantillas() {
     const body: Record<string, unknown> = { to: form.to.trim(), template_name: form.template_name.trim(), params };
     if (form.language.trim()) body.language = form.language.trim();
     try {
-      const r = await api(`/api/${tenant}/templates/send`, { method: "POST", body: JSON.stringify(body) });
+      const r = await api(`/api/templates/send`, { method: "POST", body: JSON.stringify(body) });
       setOut(JSON.stringify(r, null, 2));
     } catch (err) { setOut("⚠️ " + (err as Error).message); }
   }
@@ -27,7 +24,6 @@ export default function Plantillas() {
   return (
     <>
       <div className="usage-note">Plantillas HSM: los únicos mensajes que puedes iniciar fuera de la ventana de 24 h. El envío real requiere el token de WhatsApp del cliente.</div>
-      <div className="row"><label className="muted">Cliente:</label><TenantSelect value={tenant} onChange={setTenant} /></div>
       <table><thead><tr><th>Nombre</th><th>Categoría</th><th>Idioma</th><th>Estado</th><th className="num">Vars</th><th>Cuerpo</th></tr></thead>
         <tbody>{tpls.length ? tpls.map(t => (
           <tr key={t.name}><td className="mono" style={{ fontSize: 12 }}>{t.name}</td><td><span className="tag">{t.category}</span></td><td className="muted">{t.language}</td><td><span className="tag" style={{ background: "var(--accent-soft)", color: "var(--accent-d)" }}>{t.status}</span></td><td className="num">{t.variables}</td><td style={{ fontSize: 12 }}>{t.body}</td></tr>

@@ -15,6 +15,7 @@ import redis
 
 from . import redis_runtime
 from .util import now_iso as _now
+from core import tenants as T
 
 QUEUE = "jobs:default"
 SCHEDULED = "jobs:scheduled"

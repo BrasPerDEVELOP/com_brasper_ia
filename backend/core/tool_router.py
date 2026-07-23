@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 
+from core import tenants as T
 from . import connectors, db
 from .util import normalize_text
 
@@ -63,9 +64,11 @@ def _extract_var(text: str, name: str, endpoint: dict) -> str | None:
     return None
 
 
-def select_tool(tenant: dict, text: str) -> dict | None:
+def select_tool(text: str) -> dict | None:
+    tenant = T.get_config()
+    tenant_id = tenant["id"]
     best: tuple[int, dict, dict] | None = None
-    for connector in connectors.list_connectors(tenant):
+    for connector in connectors.list_connectors():
         for endpoint in connector.get("endpoints", []):
             score = _endpoint_score(text, endpoint)
             if score <= 0:
@@ -103,9 +106,10 @@ def result_reply(request: dict, result: dict) -> str:
     return f"Ejecute {request['tool']} en {request['connector_name']}. Resultado: {summary}"
 
 
-def persist_tool_result(tenant_id: str, conversation_id: str, request: dict, result: dict) -> None:
+def persist_tool_result(conversation_id: str, request: dict, result: dict) -> None:
+    tenant = T.get_config()
+    tenant_id = tenant["id"]
     db.add_audit_event(
-        tenant_id,
         actor="agent",
         action="tool.execute",
         resource=f"tool:{request['connector_key']}.{request['tool']}",

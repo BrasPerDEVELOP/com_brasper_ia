@@ -1,14 +1,13 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api, Connector, Endpoint, Tenant } from "@/lib/api";
-import TenantSelect from "@/components/TenantSelect";
 
 type TgInfo = {
   getMe?: { ok?: boolean; result?: { username?: string; first_name?: string }; reason?: string; detail?: string };
   webhook?: { ok?: boolean; result?: { url?: string } };
 };
 
-function TelegramStatus({ tenant, configured }: { tenant: string; configured: boolean }) {
+function TelegramStatus({ configured }: { configured: boolean }) {
   const [state, setState] = useState<"idle" | "loading" | "done">("idle");
   const [info, setInfo] = useState<TgInfo | null>(null);
   const [err, setErr] = useState("");
@@ -16,7 +15,7 @@ function TelegramStatus({ tenant, configured }: { tenant: string; configured: bo
   async function test() {
     setState("loading"); setErr(""); setInfo(null);
     try {
-      setInfo(await api<TgInfo>(`/api/${tenant}/telegram/info`));
+      setInfo(await api<TgInfo>(`/api/telegram/info`));
     } catch (e) { setErr((e as Error).message); }
     setState("done");
   }
@@ -54,7 +53,7 @@ function TelegramStatus({ tenant, configured }: { tenant: string; configured: bo
               <div style={{ color: "var(--danger)" }}>
                 ❌ No conectado — {me?.reason || me?.detail || "revisa el token"}.
                 <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                  Crea el bot con @BotFather y pon <code className="mono">TELEGRAM_TOKEN_{tenant.toUpperCase()}</code> en backend/.env.
+                  Crea el bot con @BotFather y pon <code className="mono">TELEGRAM_TOKEN_BRASPER</code> en backend/.env.
                 </div>
               </div>
             )}
@@ -62,21 +61,21 @@ function TelegramStatus({ tenant, configured }: { tenant: string; configured: bo
       )}
       {state === "idle" && !configured && (
         <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-          Aún no hay token. Crea el bot con @BotFather y añade <code className="mono">TELEGRAM_TOKEN_{tenant.toUpperCase()}</code>.
+          Aún no hay token. Crea el bot con @BotFather y añade <code className="mono">TELEGRAM_TOKEN_BRASPER</code>.
         </p>
       )}
     </div>
   );
 }
 
-function EndpointRow({ tenant, ck, ep }: { tenant: string; ck: string; ep: Endpoint }) {
+function EndpointRow({ ck, ep }: { ck: string; ep: Endpoint }) {
   const vars = (ep.path.match(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g) || []).map(m => m.replace(/[{}\s]/g, ""));
   const [vals, setVals] = useState<Record<string, string>>({});
   const [out, setOut] = useState<string>("");
   async function test() {
     setOut("Llamando…");
     try {
-      const r = await api(`/api/${tenant}/connectors/${ck}/${ep.tool}/test`, {
+      const r = await api(`/api/connectors/${ck}/${ep.tool}/test`, {
         method: "POST", body: JSON.stringify({ variables: vals }),
       });
       setOut(JSON.stringify(r, null, 2));
@@ -98,38 +97,33 @@ function EndpointRow({ tenant, ck, ep }: { tenant: string; ck: string; ep: Endpo
 }
 
 export default function Integraciones() {
-  const [tenant, setTenant] = useState("");
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [flags, setFlags] = useState<Tenant | null>(null);
   useEffect(() => {
-    if (!tenant) return;
-    api<{ connectors: Connector[] }>(`/api/${tenant}/connectors`).then(d => setConnectors(d.connectors)).catch(() => setConnectors([]));
-    api<{ tenants: Tenant[] }>("/api/tenants").then(d => setFlags(d.tenants.find(t => t.id === tenant) || null)).catch(() => setFlags(null));
-  }, [tenant]);
+    api<{ connectors: Connector[] }>(`/api/connectors`).then(d => setConnectors(d.connectors)).catch(() => setConnectors([]));
+    api<{ tenants: Tenant[] }>("/api/tenants").then(d => setFlags(d.tenants[0] || null)).catch(() => setFlags(null));
+  }, []);
   return (
     <>
       <div className="usage-note">Canales de mensajería y conectores de API por cliente. El botón &quot;Probar conexión&quot; consulta el servicio real (Telegram / httpbin), no es simulado.</div>
-      <div className="row"><label className="muted">Cliente:</label><TenantSelect value={tenant} onChange={setTenant} /></div>
 
-      {tenant && (
-        <div className="card" style={{ marginBottom: 12 }}>
-          <h3>Canales de mensajería</h3>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <b style={{ fontSize: 13 }}>WhatsApp</b>
-            <span className={"tag" + (flags?.whatsapp_configured ? "" : " handoff")}>
-              {flags?.whatsapp_configured ? "credenciales configuradas" : "pendiente (credenciales de Meta)"}
-            </span>
-          </div>
-          <TelegramStatus tenant={tenant} configured={!!flags?.telegram_configured} />
+      <div className="card" style={{ marginBottom: 12 }}>
+        <h3>Canales de mensajería</h3>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <b style={{ fontSize: 13 }}>WhatsApp</b>
+          <span className={"tag" + (flags?.whatsapp_configured ? "" : " handoff")}>
+            {flags?.whatsapp_configured ? "credenciales configuradas" : "pendiente (credenciales de Meta)"}
+          </span>
         </div>
-      )}
+        <TelegramStatus configured={!!flags?.telegram_configured} />
+      </div>
 
       {connectors.length ? connectors.map(c => (
         <div className="card" key={c.key} style={{ marginBottom: 12 }}>
           <h3>{c.name} <small className="muted" style={{ fontSize: 11, fontWeight: 400 }}>{c.base_url}</small></h3>
-          {c.endpoints.map(ep => <EndpointRow key={ep.tool} tenant={tenant} ck={c.key} ep={ep} />)}
+          {c.endpoints.map(ep => <EndpointRow key={ep.tool} ck={c.key} ep={ep} />)}
         </div>
-      )) : tenant ? <div className="empty">Este cliente no tiene conectores de API configurados.</div> : null}
+      )) : <div className="empty">Este cliente no tiene conectores de API configurados.</div>}
     </>
   );
 }

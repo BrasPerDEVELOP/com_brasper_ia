@@ -5,7 +5,7 @@ import os
 
 import httpx
 
-from . import tenants as T
+from core import tenants as T
 from .util import env_bool
 
 GRAPH = "https://graph.facebook.com/v21.0"
@@ -41,7 +41,8 @@ def verify_signature(raw_body: bytes, signature_header: str | None) -> bool:
     return hmac.compare_digest(signature_header or "", expected)
 
 
-async def send_text(tenant: dict, to: str, text: str) -> dict:
+async def send_text(to: str, text: str) -> dict:
+    tenant = T.get_config()
     token = T.whatsapp_token(tenant)
     pnid = T.whatsapp_phone_number_id(tenant)
     if not token or not pnid:
@@ -60,8 +61,9 @@ async def send_text(tenant: dict, to: str, text: str) -> dict:
     return {"sent": ok, "status": r.status_code, "detail": None if ok else r.text[:200]}
 
 
-async def upload_media(tenant: dict, filename: str, content: bytes, mime: str) -> dict:
+async def upload_media(filename: str, content: bytes, mime: str) -> dict:
     """Sube un archivo a WhatsApp (POST /{pnid}/media) y devuelve su media_id."""
+    tenant = T.get_config()
     token = T.whatsapp_token(tenant)
     pnid = T.whatsapp_phone_number_id(tenant)
     if not token or not pnid:
@@ -76,10 +78,11 @@ async def upload_media(tenant: dict, filename: str, content: bytes, mime: str) -
     return {"ok": True, "id": r.json().get("id")}
 
 
-async def send_image_upload(tenant: dict, to: str, filename: str, content: bytes,
+async def send_image_upload(to: str, filename: str, content: bytes,
                             mime: str, caption: str = "") -> dict:
     """Sube la imagen y la envía por WhatsApp usando su media_id (sin URL pública)."""
-    up = await upload_media(tenant, filename, content, mime)
+    tenant = T.get_config()
+    up = await upload_media(filename, content, mime)
     if not up.get("ok"):
         return {"sent": False, "reason": up.get("detail") or up.get("reason")}
     token = T.whatsapp_token(tenant)
@@ -97,8 +100,9 @@ async def send_image_upload(tenant: dict, to: str, filename: str, content: bytes
             "media_id": up.get("id")}
 
 
-async def send_image(tenant: dict, to: str, link: str, caption: str = "") -> dict:
+async def send_image(to: str, link: str, caption: str = "") -> dict:
     """Envía una imagen por WhatsApp Cloud API (type=image). `link` es una URL pública."""
+    tenant = T.get_config()
     token = T.whatsapp_token(tenant)
     pnid = T.whatsapp_phone_number_id(tenant)
     if not token or not pnid:
@@ -156,8 +160,9 @@ def parse_incoming(body: dict) -> list[dict]:
     return out
 
 
-async def download_media(tenant: dict, media_id: str) -> tuple[bytes | None, str | None]:
+async def download_media(media_id: str) -> tuple[bytes | None, str | None]:
     """Descarga un archivo entrante de WhatsApp por media_id (GET media -> url -> bytes)."""
+    tenant = T.get_config()
     token = T.whatsapp_token(tenant)
     if not token:
         return None, None

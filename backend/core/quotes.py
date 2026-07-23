@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from core import tenants as T
 from . import brasper_api, policies
 
 _RECEIVE_KEYWORDS = ("recibir", "receive", "receber", "reciba", "receba", "llegue", "lleguen", "llegar", "cheguem", "chegar")
@@ -85,12 +86,14 @@ _COPY = {
 }
 
 
-def _cfg(tenant: dict) -> dict:
+def _cfg() -> dict:
+    tenant = T.get_config()
     return tenant.get("quote") or {}
 
 
-def enabled(tenant: dict) -> bool:
-    return bool(_cfg(tenant).get("enabled"))
+def enabled() -> bool:
+    tenant = T.get_config()
+    return bool(_cfg().get("enabled"))
 
 
 def _copy(language: str) -> dict:
@@ -105,20 +108,22 @@ def _fmt(value: Any) -> str:
     return f"{float(value or 0):,.2f}"
 
 
-def pairs(tenant: dict) -> list[tuple[str, str]]:
+def pairs() -> list[tuple[str, str]]:
+    tenant = T.get_config()
     out = []
-    for pair in _cfg(tenant).get("pairs", []):
+    for pair in _cfg().get("pairs", []):
         if isinstance(pair, (list, tuple)) and len(pair) == 2:
             out.append((str(pair[0]).upper(), str(pair[1]).upper()))
     return out
 
 
-def rate_for(tenant: dict, origin: str, destination: str) -> Optional[float]:
+def rate_for(origin: str, destination: str) -> Optional[float]:
+    tenant = T.get_config()
     # Un tenant conectado a Brasper usa exclusivamente su API. Si la API falla o
     # no publica el corredor, no se cotiza con un valor local potencialmente viejo.
-    if brasper_api.enabled(tenant):
-        return brasper_api.rate_for(tenant, origin, destination)
-    raw = (_cfg(tenant).get("rates") or {}).get(f"{origin}->{destination}")
+    if brasper_api.enabled():
+        return brasper_api.rate_for(origin, destination)
+    raw = (_cfg().get("rates") or {}).get(f"{origin}->{destination}")
     try:
         rate = float(raw)
     except (TypeError, ValueError):
@@ -126,9 +131,10 @@ def rate_for(tenant: dict, origin: str, destination: str) -> Optional[float]:
     return rate if rate > 0 else None
 
 
-def has_intent(tenant: dict, text: str) -> bool:
+def has_intent(text: str) -> bool:
     """Señal de cotización: pedido explícito, o verbo de envío CON monto/moneda."""
-    if not enabled(tenant):
+    tenant = T.get_config()
+    if not enabled():
         return False
     low = policies._normalize_text(text)
     if any(k in low for k in _STRONG_HINTS):
@@ -159,11 +165,12 @@ def _ordered_currencies(text: str) -> list[str]:
     return [code for code, _ in sorted(pos_by_code.items(), key=lambda kv: kv[1])]
 
 
-def _infer_pair(tenant: dict, origin: Optional[str],
+def _infer_pair(origin: Optional[str],
                 destination: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     """Completa el lado faltante si el corredor es ÚNICO en los pares del tenant.
     Ej. Brasper: origen PEN ⇒ destino BRL; recibir PEN ⇒ origen BRL."""
-    prs = pairs(tenant)
+    tenant = T.get_config()
+    prs = pairs()
     if not prs:
         return origin, destination
     if origin and not destination:
@@ -177,7 +184,7 @@ def _infer_pair(tenant: dict, origin: Optional[str],
     return origin, destination
 
 
-def extract_request(tenant: dict, text: str, prev: Optional[dict] = None) -> dict:
+def extract_request(text: str, prev: Optional[dict] = None) -> dict:
     """Extrae origen/destino/monto/modo del mensaje (reglas del bot real).
 
     Entiende monedas explícitas Y países ("a Brasil", "en Perú"), e infiere el
@@ -188,6 +195,7 @@ def extract_request(tenant: dict, text: str, prev: Optional[dict] = None) -> dic
     se CONTINÚA la misma línea (mismo modo y corredor), solo cambia el monto —
     así no se resetea a "enviar" cuando el cliente venía en modo "recibir".
     """
+    tenant = T.get_config()
     low = policies._normalize_text(text)
     currencies = _ordered_currencies(text)
     amount = policies.extract_amount(text)
@@ -221,7 +229,7 @@ def extract_request(tenant: dict, text: str, prev: Optional[dict] = None) -> dic
             origin = currencies[0]
 
     # Inferir el lado faltante por el corredor (no depende del formato exacto).
-    origin, destination = _infer_pair(tenant, origin, destination)
+    origin, destination = _infer_pair(origin, destination)
 
     missing = []
     if origin is None:
@@ -310,36 +318,38 @@ def _quote_inverse(desired_receive: float, rate: float,
     return best
 
 
-def compute(tenant: dict, origin: str, destination: str,
+def compute(origin: str, destination: str,
             amount: float, mode: str = "send") -> dict:
     """Cotiza validando par/tasa/monto. Devuelve {'error': msg} o el quote."""
-    cfg = _cfg(tenant)
+    tenant = T.get_config()
+    cfg = _cfg()
     language = "es"
     copy = _copy(language)
-    supported = pairs(tenant)
+    supported = pairs()
     if supported and (origin, destination) not in supported:
         listed = ", ".join(f"{a}→{b}" for a, b in supported)
         return {"error": copy["invalid_pair"].format(pairs=listed)}
     if amount is None or amount <= 0:
         return {"error": copy["invalid_amount"]}
-    rate = rate_for(tenant, origin, destination)
+    rate = rate_for(origin, destination)
     if rate is None:
         listed = ", ".join(f"{a}→{b}" for a, b in supported) or "—"
         return {"error": copy["invalid_pair"].format(pairs=listed)}
     ranges = cfg.get("commission_ranges") or []
     coupon = cfg.get("coupon") or None
     # Con API activa tampoco se usan comisiones o cupones locales.
-    if brasper_api.enabled(tenant):
-        ranges = brasper_api.commission_ranges(tenant, origin, destination)
-        coupon = brasper_api.best_coupon(tenant, origin, destination)
+    if brasper_api.enabled():
+        ranges = brasper_api.commission_ranges(origin, destination)
+        coupon = brasper_api.best_coupon(origin, destination)
     fn = _quote_inverse if mode == "receive" else _quote_from_gross_send
     quote = fn(amount, rate, ranges, coupon)
     quote.update({"origin_currency": origin, "destination_currency": destination, "mode": mode})
     return quote
 
 
-def reply(tenant: dict, quote: dict, language: str = "es") -> str:
+def reply(quote: dict, language: str = "es") -> str:
     """Resumen legible de la cotización (formato del bot real) + CTA de contacto."""
+    tenant = T.get_config()
     c = _copy(language)
     if quote.get("error"):
         return quote["error"]
@@ -352,10 +362,10 @@ def reply(tenant: dict, quote: dict, language: str = "es") -> str:
     )
     if quote.get("coupon_code") and quote.get("coupon_savings_amount"):
         parts += (f" 🎟️ {c['coupon']}: {quote['coupon_code']} "
-                  f"(-{_fmt(quote['coupon_savings_amount'])} {quote['origin_currency']}).")
+        f"(-{_fmt(quote['coupon_savings_amount'])} {quote['origin_currency']}).")
     parts += f"\n{c['referential']}"
     # Vigencia del TC (regla del proceso Brasper: la tasa "vive" ~20 min).
-    minutes = _tc_validity_minutes(tenant)
+    minutes = _tc_validity_minutes()
     if minutes:
         parts += "\n" + c["validity"].format(minutes=minutes)
     # CTA de cierre: con takeover el asesor atiende dentro del bot (no WhatsApp externo).
@@ -363,9 +373,10 @@ def reply(tenant: dict, quote: dict, language: str = "es") -> str:
     return parts
 
 
-def _tc_validity_minutes(tenant: dict) -> int:
+def _tc_validity_minutes() -> int:
     """Minutos de vigencia del tipo de cambio (0 = sin vigencia). Def: 20."""
-    raw = _cfg(tenant).get("tc_validity_minutes", 20)
+    tenant = T.get_config()
+    raw = _cfg().get("tc_validity_minutes", 20)
     try:
         return max(int(raw), 0)
     except (TypeError, ValueError):
@@ -376,17 +387,18 @@ def incomplete_reply(language: str = "es") -> str:
     return _copy(language)["incomplete"]
 
 
-def clarify_reply(tenant: dict, request: dict, language: str = "es") -> str:
+def clarify_reply(request: dict, language: str = "es") -> str:
     """Pregunta concreta cuando el pedido de cotización viene incompleto.
 
     Nunca decimos que 'no tenemos el tipo de cambio' (las tasas son deterministas):
     pedimos SOLO el dato que falta, con las opciones reales del corredor.
     """
+    tenant = T.get_config()
     origin = request.get("origin")
     destination = request.get("destination")
     amount = request.get("amount")
     mode = request.get("mode", "send")
-    prs = pairs(tenant)
+    prs = pairs()
     names = {
         "es": {"PEN": "soles (PEN)", "BRL": "reales (BRL)", "USD": "dólares (USD)"},
         "pt": {"PEN": "soles (PEN)", "BRL": "reais (BRL)", "USD": "dólares (USD)"},

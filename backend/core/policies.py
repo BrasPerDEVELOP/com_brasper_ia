@@ -47,6 +47,8 @@ import re
 import unicodedata
 from typing import Optional
 
+from core import tenants as T
+
 # --- Constantes de deteccion (multilingues, agnosticas) ---------------------
 
 _GREETINGS = (
