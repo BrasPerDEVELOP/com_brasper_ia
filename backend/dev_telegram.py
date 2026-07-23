@@ -21,10 +21,8 @@ from core import tenants as T
 
 
 async def main() -> None:
-    configured = [
-        T.get_tenant(tid) for tid in T.all_tenants()
-        if T.get_tenant(tid) and T.telegram_token(T.get_tenant(tid))
-    ]
+    cfg = T.get_config()
+    configured = [cfg] if T.telegram_token(cfg) else []
     if not configured:
         print("No hay tenants con Telegram configurado.")
         print("Agrega TELEGRAM_TOKEN_<TENANT> en backend/.env y reintenta.")

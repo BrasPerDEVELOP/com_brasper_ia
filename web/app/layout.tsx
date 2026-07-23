@@ -8,8 +8,8 @@ const body = Hanken_Grotesk({ subsets: ["latin"], weight: ["400", "500", "600"],
 const mono = JetBrains_Mono({ subsets: ["latin"], weight: ["400", "500"], variable: "--font-mono" });
 
 export const metadata: Metadata = {
-  title: "Cauce · Panel de agencia",
-  description: "Panel multi-tenant de agentes conversacionales",
+  title: "Brasper · Panel",
+  description: "Plataforma de IA",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

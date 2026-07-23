@@ -33,7 +33,7 @@ function LoginScreen({ onLogin }: { onLogin: (m: Me) => void }) {
   return (
     <div className="login-wrap">
       <div className="login-box">
-        <h2>Cauce · Panel</h2>
+        <h2>Brasper · Panel</h2>
         <p className="muted" style={{ margin: "0 0 6px", fontSize: 13 }}>Ingresa con tu email de equipo.</p>
         <input value={email} placeholder="email" onChange={e => setEmail(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter") submit(); }} />
@@ -41,9 +41,6 @@ function LoginScreen({ onLogin }: { onLogin: (m: Me) => void }) {
           onKeyDown={e => { if (e.key === "Enter") submit(); }} />
         <button className="btn" onClick={submit}>Entrar</button>
         {err && <div style={{ color: "var(--danger)", fontSize: 12, marginTop: 8 }}>{err}</div>}
-        <div className="muted" style={{ fontSize: 11, marginTop: 12, lineHeight: 1.7 }}>
-          Demo local: owner@agencia.com (todo) · agent@brasper.com (su cliente) · billing@agencia.com
-        </div>
       </div>
     </div>
   );
@@ -72,7 +69,7 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
           <span className="logo">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M4 12c4 0 4-6 8-6s4 12 8 12" /></svg>
           </span>
-          <div><b>Cauce</b><small>Panel · datos reales</small></div>
+          <div><b>Brasper</b><small>Panel Admin</small></div>
         </div>
         <nav className="nav">
           {GROUPS.map(g => {
@@ -95,16 +92,15 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
             <div className="av">{(me.name || "?").slice(0, 1)}</div>
             <div className="grow">
               <div className="un">{me.name}</div>
-              <div className="ue">{me.role}{me.is_agency ? " · agencia" : me.tenant_scope ? " · " + me.tenant_scope : ""}</div>
+              <div className="ue">{me.role}</div>
             </div>
           </div>
         </div>
       </aside>
       <main className="main">
         <header className="hdr">
-          <div className="pt"><span className="k">{me.is_agency ? "Agencia" : me.tenant_scope}</span><span className="v">{title}</span></div>
+          <div className="pt"><span className="k">Brasper</span><span className="v">{title}</span></div>
           <span className="grow" />
-          <span className="pill live">Backend real · :8002</span>
           <button className="btn btn-ghost" onClick={() => { clearToken(); setMe(null); }}>Salir</button>
         </header>
         <section className="content rise" key={pathname}>{children}</section>

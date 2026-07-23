@@ -87,7 +87,8 @@ def cmd_list_users(_args) -> None:
 
 
 def cmd_list_tenants(_args) -> None:
-    tenants = T.all_tenants(include_inactive=True)
+    cfg = T.get_config()
+    tenants = {"brasper": cfg}
     if not tenants:
         print("  (sin tenants)")
         return
