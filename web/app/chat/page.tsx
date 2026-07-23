@@ -33,8 +33,14 @@ export default function Chat() {
 
   return (
     <>
-      <div className="row">
-        <span className="pill live">LLM real · queda persistido y medido</span></div>
+      <div className="card-head">
+        <div>
+          <h3>Prueba del Bot</h3>
+          <div className="muted" style={{ fontSize: 12 }}>
+            Simula un chat de WhatsApp con la IA
+          </div>
+        </div>
+      </div>
       <div className="thread" style={{ height: "calc(100vh - 200px)" }}>
         <div className="msgs">
           {bubbles.length ? bubbles.map((b, i) => (
