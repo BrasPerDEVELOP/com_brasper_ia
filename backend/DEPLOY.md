@@ -18,8 +18,7 @@ Completa como minimo:
 | `POSTGRES_DB` | Si | DB del contenedor Postgres |
 | `POSTGRES_USER` | Si | Usuario Postgres |
 | `POSTGRES_PASSWORD` | Si | Password Postgres |
-| `TENANTS_SOURCE=database` | Si | Tenants desde Postgres |
-| `DEEPSEEK_API_KEY` | Si | LLM por defecto de los tenants actuales |
+| `DEEPSEEK_API_KEY` | Si | LLM por defecto de Brasper |
 | `PANEL_ADMIN_EMAIL` | Si | Owner inicial |
 | `PANEL_ADMIN_TOKEN` | Si | Token opaco del owner |
 | `PANEL_LOGIN_CODE` | Si | Codigo temporal de login |
@@ -28,8 +27,8 @@ Completa como minimo:
 | `META_APP_SECRET` | Canal WA | Firma de WhatsApp |
 | `WHATSAPP_VERIFY_TOKEN` | Canal WA | Verificacion de webhook Meta |
 | `WHATSAPP_REQUIRE_SIGNATURE=true` | Canal WA | Rechaza webhooks sin firma valida |
-| `TELEGRAM_TOKEN_*` | Canal TG | Token de BotFather por tenant |
-| `TELEGRAM_SECRET_*` | Canal TG | Secret del webhook Telegram por tenant |
+| `TELEGRAM_TOKEN` | Canal TG | Token de BotFather |
+| `TELEGRAM_SECRET` | Canal TG | Secret del webhook Telegram |
 
 Genera el token admin:
 
@@ -60,11 +59,11 @@ Proxy en `http://localhost:8080` (panel + API en el mismo origen).
    echo 'SITE_ADDRESS=panel.tu-dominio.com' >> .env
    ```
 
-3. Levanta con el override de producción:
+3. Despliega usando el script automatizado (que descarga la última versión y reconstruye los contenedores de forma segura):
 
    ```bash
-   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-   docker compose logs -f api
+   cd scripts/
+   bash scripts/deploy.sh
    ```
 
 Caddy expone 80/443 y saca/renueva el certificado TLS solo (Let's Encrypt).
@@ -97,22 +96,19 @@ cd backend
 
 En Docker, `manage.py migrate` ya corre al arrancar `api`.
 
-Tablas actuales:
+Tablas actuales (Single-Tenant Brasper):
 
 - `panel_users`
+- `customers`
 - `conversations`
 - `messages`
+- `quotes`
 - `usage_events`
 - `audit_events`
-- `tenants`
-- `channel_configs`
-- `connector_configs`
 - `appointments`
 - `secret_rotations`
 
-Los tenants se leen desde Postgres cuando `TENANTS_SOURCE=database` o cuando hay
-`DATABASE_URL` Postgres. `backend/config/tenants.json` sirve como bootstrap si la
-tabla `tenants` esta vacia.
+La configuración del canal se lee estáticamente desde el entorno y `config/tenants.json`.
 
 ## 4. Seguridad
 
