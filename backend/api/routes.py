@@ -316,16 +316,15 @@ class TenantSecretRefsIn(BaseModel):
 
 @router.get("/api/admin/tenants")
 def admin_tenants_list(user: dict = Depends(auth.require("tenants:read"))):
-    tenants = []
-    for tid, cfg in T.all_tenants(include_inactive=True).items():
-        tenants.append({"id": tid, **cfg})
+    cfg = T.get_config()
+    # The UI expects a list of tenants
     return {
-        "source": "database" if T.database_tenants_enabled() else "config/tenants.json",
-        "tenants": tenants,
+        "source": "config/tenants.json",
+        "tenants": [{"id": cfg.get("id", "brasper"), **cfg}],
     }
 
 
-@router.get("/api/admin/tenants/quote-rates")
+@router.get("/api/admin/quote-rates")
 def admin_tenant_quote_rates(user: dict = Depends(auth.require("tenants:read"))):
     tenant = T.get_config()
     if not brasper_api.enabled(tenant):
@@ -357,12 +356,38 @@ def admin_tenants_create(body: TenantCreateIn,
 def admin_tenants_patch(body: TenantPatchIn,
                         user: dict = Depends(auth.require("tenants:write"))):
     _reject_plain_secrets(body.config)
-    tenant = _write_tenant_or_error(T.patch_tenant_config, T.get_config()["id"], body.config)
+    
+    # Save the config locally to tenants.json
+    import json
+    cfg_path = T.CONFIG_PATH
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        
+    if "tenants" not in data:
+        data["tenants"] = {}
+    if "brasper" not in data["tenants"]:
+        data["tenants"]["brasper"] = {}
+        
+    def deep_merge(target, source):
+        for k, v in source.items():
+            if isinstance(v, dict) and isinstance(target.get(k), dict):
+                deep_merge(target[k], v)
+            else:
+                target[k] = v
+                
+    deep_merge(data["tenants"]["brasper"], body.config)
+    
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        
+    T.reload_config()
+    tenant = T.get_config()
+
     db.add_audit_event(
-        tenant["id"], user.get("email"), "tenant.patch", f"tenant:{tenant['id']}",
+        tenant.get("id", "brasper"), user.get("email"), "tenant.patch", f"tenant:brasper",
         {"keys": sorted(body.config.keys())},
     )
-    _enqueue_tenant_changed(tenant["id"], user.get("email"), "tenant.patch")
+    _enqueue_tenant_changed(tenant.get("id", "brasper"), user.get("email"), "tenant.patch")
     return {"tenant": tenant}
 
 
