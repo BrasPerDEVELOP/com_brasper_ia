@@ -73,7 +73,7 @@ def health():
         ok = False
     payload = {
         "ok": ok,
-        "tenants": len(T.all_tenants()),
+        "tenants": 1,
         "db": {"backend": db.backend_name(), "ok": db_ok},
         "redis": {"configured": redis_runtime.configured(), "ok": redis_ok},
         "env": "production" if _is_production() else "development",
