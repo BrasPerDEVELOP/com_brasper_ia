@@ -1,6 +1,7 @@
 """Worker de produccion para jobs livianos en Redis."""
 from __future__ import annotations
 
+import logging
 import os
 import time
 import asyncio
@@ -11,6 +12,9 @@ from core import alerts, auth, audio_adapter, db, debounce, engine, jobs, tenant
 
 
 def init() -> None:
+    # El token del bot de Telegram viaja en la ruta de la URL y httpx la registra
+    # en INFO: sin esto el secreto acaba en los logs del worker.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     db.assert_production_infra()   # fail-fast: en produccion exige Postgres + Redis
     db.init_db()
     auth.ensure_schema()
@@ -69,6 +73,10 @@ async def handle_channel_message(payload: dict) -> None:
         channel=channel,
         conversation_id=payload.get("conversation_id"),
     )
+    # Bot en pausa (un asesor atiende) o sin texto -> no se envía nada. Sin esto el
+    # worker rompía el takeover y mandaba mensajes vacíos al canal.
+    if out.get("paused") or not (out.get("response") or "").strip():
+        return
     if channel == "whatsapp":
         await whatsapp.send_text(payload["to"], out["response"])
         return
@@ -158,8 +166,13 @@ def main() -> int:
             last_sched = run_scheduled(last_sched)
         except Exception as e:  # noqa: BLE001
             print(f"[worker] tarea periódica error: {e}")
-        if handle_due_debounce():
-            continue
+        try:
+            # El worker no debe morir por un mensaje agrupado que falle: sin este
+            # try el bucle se caía y dejaba de atender la cola entera.
+            if handle_due_debounce():
+                continue
+        except Exception as e:  # noqa: BLE001
+            print(f"[worker] error procesando debounce: {e}")
         job = jobs.pop(timeout=5)
         if not job:
             if os.getenv("WORKER_ONCE") == "true":

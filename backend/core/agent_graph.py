@@ -53,6 +53,7 @@ class AgentState(TypedDict, total=False):
     system_prompt: str
     messages: list[dict]
     llm_result: dict
+    llm_error: str | None
     tool_request: dict | None
     tool_result: dict | None
     quote_pending: bool
@@ -438,8 +439,44 @@ def build_messages(state: AgentState) -> dict[str, Any]:
 
 async def call_llm(state: AgentState) -> dict[str, Any]:
     tenant = T.get_config()
-    result = await llm.chat(tenant, state["messages"])
-    return {"llm_result": result}
+    try:
+        return {"llm_result": await llm.chat(tenant, state["messages"])}
+    except llm.LLMError as e:
+        # Nunca dejamos al cliente sin respuesta por un fallo del proveedor: lo
+        # atiende un asesor. Antes la excepción subía hasta el webhook (que ya
+        # había respondido 200 a Telegram) y el bot se quedaba mudo.
+        return {"llm_error": str(e)}
+
+
+def route_after_llm(state: AgentState) -> str:
+    return "failed" if state.get("llm_error") else "persist"
+
+
+_LLM_FALLBACK = {
+    "es": ("Disculpa, tuve un problema para responderte en este momento 🙏 "
+           "Un asesor continúa contigo aquí mismo en unos instantes."),
+    "pt": ("Desculpe, tive um problema para te responder agora 🙏 "
+           "Um assessor continua com você aqui mesmo em instantes."),
+    "en": ("Sorry, I had trouble replying just now 🙏 "
+           "An advisor will continue with you right here in a moment."),
+}
+
+
+def llm_failed(state: AgentState) -> dict[str, Any]:
+    """El LLM falló (modelo retirado, sin saldo, timeout, respuesta vacía…).
+    Respondemos con cortesía y derivamos a un asesor humano."""
+    cid = state["cid"]
+    language = state.get("analysis", {}).get("language", "es")
+    reply = _LLM_FALLBACK.get(language, _LLM_FALLBACK["es"])
+    db.add_message(cid, "assistant", reply)
+    observability.event("llm.failed", conversation_id=cid, error=state.get("llm_error"))
+    assigned = None
+    if db.conversation_status(cid) != "handoff":
+        db.set_conversation_status(cid, "handoff")
+        assigned = auth.derive_to_advisor(cid)
+    observability.event("conversation.handoff", conversation_id=cid,
+                        reason="llm_error", assigned_to=assigned)
+    return {"response": reply, "handoff": True, "usage": None}
 
 
 def persist_llm(state: AgentState) -> dict[str, Any]:
@@ -486,6 +523,7 @@ def graph():
     workflow.add_node("build_messages", build_messages)
     workflow.add_node("call_llm", call_llm)
     workflow.add_node("persist_llm", persist_llm)
+    workflow.add_node("llm_failed", llm_failed)
 
     workflow.set_entry_point("start_conversation")
     workflow.add_edge("start_conversation", "pre_process")
@@ -508,8 +546,11 @@ def graph():
         "handle_tool", route_after_tool, {"end": END, "llm": "build_messages"},
     )
     workflow.add_edge("build_messages", "call_llm")
-    workflow.add_edge("call_llm", "persist_llm")
+    workflow.add_conditional_edges(
+        "call_llm", route_after_llm, {"persist": "persist_llm", "failed": "llm_failed"},
+    )
     workflow.add_edge("persist_llm", END)
+    workflow.add_edge("llm_failed", END)
     return workflow.compile()
 
 
@@ -525,10 +566,10 @@ async def handle_message(user_ref: str, text: str,
         "user_media": user_media,
     })
     return {
-        "response": state["response"],
+        "response": state.get("response", ""),
         "conversation_id": state["cid"],
-        "handoff": state["handoff"],
-        "usage": state["usage"],
+        "handoff": state.get("handoff", False),
+        "usage": state.get("usage"),
         "paused": state.get("paused", False),
         "new_lead": state.get("new_lead", False),
         "banner": state.get("banner"),

@@ -4,15 +4,41 @@ Ejecutar desde backend/:  ../.venv/bin/python -m uvicorn main:app --port 8002
 """
 import os
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import router
-from core import db, auth, tenants, util
+from core import auth, db, llm, tenants, util
 
-app = FastAPI(title="Cauce · Plataforma IA multi-tenant", version="0.2.0")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(message)s")
+
+# httpx registra la URL completa de cada petición en INFO, y el token del bot de
+# Telegram viaja EN LA RUTA (api.telegram.org/bot<token>/sendMessage): con esto el
+# secreto quedaba escrito en los logs del contenedor. Solo avisos y errores.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Canario de arranque del LLM. Un modelo retirado por el proveedor deja al bot
+    mudo (responde 400 en cada turno), así que se avisa al desplegar en vez de
+    descubrirlo por un cliente sin respuesta. No bloquea el arranque."""
+    try:
+        probe = await llm.probe(tenants.get_config())
+    except Exception as e:  # noqa: BLE001 - el arranque nunca depende del canario
+        logging.warning("[llm] no se pudo comprobar el modelo: %s", e)
+    else:
+        if probe.get("ok"):
+            logging.info("[llm] modelo '%s' disponible", probe.get("model"))
+        else:
+            logging.error("[llm] CONFIGURACIÓN INVÁLIDA: %s", probe.get("error"))
+    yield
+
+
+app = FastAPI(title="Cauce · Plataforma IA multi-tenant", version="0.2.0",
+              lifespan=lifespan)
 
 _origins = os.getenv(
     "CORS_ALLOW_ORIGINS",

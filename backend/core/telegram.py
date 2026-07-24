@@ -162,7 +162,7 @@ def parse_update(body: dict) -> dict | None:
     return None  # tipos no soportados (ubicación, contacto, etc.)
 
 
-def _allows_chat(chat_type: str) -> bool:
+def allows_chat(chat_type: str) -> bool:
     """Por defecto el bot SOLO responde en chats privados (1-a-1), no en grupos.
     Un tenant puede habilitar grupos con telegram.allow_groups=true."""
     tenant = T.get_config()
@@ -177,7 +177,7 @@ async def process_update(body: dict) -> dict:
     msg = parse_update(body)
     if not msg:
         return {"handled": False}
-    if not _allows_chat(msg["chat_type"]):
+    if not allows_chat(msg["chat_type"]):
         # Ignora grupos/canales en silencio (no responde ni gasta LLM).
         return {"handled": False, "ignored_chat_type": msg["chat_type"]}
     chat_id = msg["chat_id"]

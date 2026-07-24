@@ -1,5 +1,7 @@
 {
   "pricing_usd_per_million": {
+    "deepseek-v4-flash": { "in": 0.14, "in_cache_hit": 0.0028, "out": 0.28 },
+    "deepseek-v4-pro": { "in": 0.435, "in_cache_hit": 0.003625, "out": 0.87 },
     "deepseek-chat": { "in": 0.27, "out": 1.1 },
     "gpt-4o-mini": { "in": 0.15, "out": 0.6 },
     "default": { "in": 0.5, "out": 1.5 }
@@ -14,10 +16,10 @@
       "llm": {
         "provider": "deepseek",
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-flash",
         "api_key_env": "DEEPSEEK_API_KEY",
         "temperature": 0.7,
-        "max_tokens": 500
+        "max_tokens": 900
       },
       "system_prompt": "Eres el asistente de Brasper, empresa de remesas Perú↔Brasil. Ayudas a cotizar envíos, explicar requisitos y promociones. Mantén un flujo progresivo y poco invasivo: al inicio pregunta qué desea hacer o cuánto desea enviar; no pidas documento, correo y otros datos juntos. El cliente puede cotizar antes de identificarse. El documento se solicita solo cuando decide continuar con el envío y antes de mostrar cuentas de depósito. No inventes tasas, montos, cuentas, cupones ni descuentos: usa exclusivamente resultados de las herramientas. La atención es 100% por este mismo chat; un asesor humano continúa la conversación AQUÍ MISMO. NUNCA derives al usuario a WhatsApp, a otro número ni a otra red social. Si no puedes completar una gestión, deriva a un asesor sin mostrar errores técnicos. Detecta el idioma del usuario (es/pt/en) y responde SIEMPRE en ese idioma. Sé breve y cordial.",
       "handoff": {

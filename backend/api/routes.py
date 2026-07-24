@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
-from core import db, engine, whatsapp, connectors, wa_templates, auth, telegram, rate_limit, redis_runtime, jobs, debounce, observability, alerts, audio_adapter, util, brasper_api
+from core import db, engine, whatsapp, connectors, wa_templates, auth, telegram, rate_limit, redis_runtime, jobs, debounce, observability, alerts, audio_adapter, util, brasper_api, llm
 from core import tenants as T
 
 router = APIRouter()
@@ -173,6 +173,9 @@ async def _handle_whatsapp_audio(tenant: dict, msg: dict, user_ref: str) -> dict
     if not tr.get("ok") or not (tr.get("text") or "").strip():
         return {**base, "sent": False, "reason": f"audio no transcrito: {tr.get('error')}"}
     out = await engine.handle_message(user_ref, tr["text"].strip(), channel="whatsapp")
+    # Un asesor puede haber tomado la conversación: el bot no responde por encima.
+    if out.get("paused") or not (out.get("response") or "").strip():
+        return {**base, "transcribed": True, "sent": False, "paused": True}
     send = await whatsapp.send_text(msg["from"], out["response"])
     return {**base, "transcribed": True, "sent": send.get("sent", False)}
 
@@ -267,6 +270,13 @@ async def webhook_receive(request: Request):
             # Un asesor humano atiende esta conversación: el bot no responde.
             results.append({"tenant": tenant["id"], "from": msg["from"],
                             "resolved": True, "sent": False, "paused": True})
+            continue
+        send = await whatsapp.send_text(msg["from"], out["response"])
+        results.append({"tenant": tenant["id"], "from": msg["from"],
+                        "resolved": True, "sent": send.get("sent", False)})
+    return {"received": len(results), "results": results}
+
+
 # ---------- panel de agencia ----------
 @router.get("/api/tenants")
 def tenants_overview(user: dict = Depends(auth.require("tenants:read"))):
@@ -895,13 +905,18 @@ async def telegram_webhook(request: Request, tenant_id: str | None = None):
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="JSON inválido")
     parsed = telegram.parse_update(body)
-    if parsed and debounce.buffer_message(
-        tenant["id"],
-        "telegram",
-        f"tg:{parsed['chat_id']}",
-        parsed["text"],
-        {"chat_id": parsed["chat_id"]},
-    ):
+    # Solo se agrupan ráfagas de TEXTO en chats privados. Un adjunto agrupado
+    # perdería el archivo (el buffer solo guarda texto) y un chat de grupo se
+    # saltaría el filtro de allows_chat: ambos van por process_update.
+    if (parsed and not parsed.get("media") and (parsed.get("text") or "").strip()
+            and telegram.allows_chat(parsed["chat_type"])
+            and debounce.buffer_message(
+                tenant["id"],
+                "telegram",
+                f"tg:{parsed['chat_id']}",
+                parsed["text"],
+                {"chat_id": parsed["chat_id"]},
+            )):
         return {"ok": True, "queued": True}
     # Telegram reintenta si tardamos: respondemos 200 rápido y procesamos aparte.
     # La tarea captura y registra excepciones; un create_task desnudo ocultaba los
@@ -952,3 +967,11 @@ async def telegram_info(user: dict = Depends(auth.require("config:read"))):
     tenant = T.get_config()
     return {"getMe": await telegram.get_me(),
             "webhook": await telegram.get_webhook_info()}
+
+
+# ---------- diagnóstico del LLM ----------
+@router.get("/api/diagnostics/llm")
+async def diagnostics_llm(user: dict = Depends(auth.require("config:read"))):
+    """¿El modelo configurado sigue existiendo en el proveedor? Si no, el bot
+    responde 400 en cada turno y deriva todo a un asesor. Sin gasto de tokens."""
+    return await llm.probe(T.get_config())
