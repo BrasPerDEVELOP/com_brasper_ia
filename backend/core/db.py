@@ -682,6 +682,43 @@ def get_messages(*args) -> list[dict]:
     return out
 
 
+def delete_conversation(conversation_id: str, expected_user_ref: str) -> dict:
+    """Elimina una conversación y sus datos dependientes en una transacción.
+
+    ``expected_user_ref`` es un guard obligatorio para evitar borrar otra
+    conversación por copiar un ID incorrecto desde el panel.
+    """
+    with connect() as con:
+        row = con.execute(
+            "SELECT id, user_ref, channel FROM conversations WHERE id=?",
+            (conversation_id,),
+        ).fetchone()
+        if not row:
+            raise KeyError(conversation_id)
+        conv = _rowdict(row)
+        if conv.get("user_ref") != expected_user_ref:
+            raise ValueError("user_ref no coincide con la conversación")
+
+        counts: dict[str, int] = {}
+        for table in ("messages", "usage_events", "appointments", "quotes"):
+            count_row = con.execute(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE conversation_id=?",
+                (conversation_id,),
+            ).fetchone()
+            counts[table] = int(count_row["n"] if count_row else 0)
+            con.execute(
+                f"DELETE FROM {table} WHERE conversation_id=?",
+                (conversation_id,),
+            )
+        con.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
+    return {
+        "conversation_id": conversation_id,
+        "user_ref": expected_user_ref,
+        "channel": conv.get("channel"),
+        "deleted": counts,
+    }
+
+
 def add_usage(*args) -> None:
     if len(args) == 7:
         tenant_id, conversation_id, provider, model, tokens_in, tokens_out, cost_usd = args

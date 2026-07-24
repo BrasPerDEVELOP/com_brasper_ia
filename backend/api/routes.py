@@ -471,6 +471,32 @@ def conversation_messages(conversation_id: str,
             "status": conv.get("status"), "assigned_to": conv.get("assigned_to")}
 
 
+@router.delete("/api/conversations/{conversation_id}")
+def conversation_delete(
+    conversation_id: str,
+    expected_user_ref: str = Query(..., min_length=1),
+    user: dict = Depends(auth.require("tenants:write")),
+):
+    """Eliminación administrativa permanente con guard de identidad."""
+    try:
+        result = db.delete_conversation(conversation_id, expected_user_ref)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.add_audit_event(
+        user.get("email"),
+        "conversation.delete",
+        f"conversation:{conversation_id}",
+        {
+            "user_ref": expected_user_ref,
+            "channel": result.get("channel"),
+            "deleted": result.get("deleted"),
+        },
+    )
+    return result
+
+
 @router.get("/api/media")
 async def media_proxy(provider: str, ref: str,
                       user: dict = Depends(auth.require("conversations:read"))):
