@@ -150,7 +150,8 @@ def _integration_request(tenant: dict, method: str, path: str, **kwargs) -> dict
         with httpx.Client(timeout=20.0) as client:
             response = client.request(method, f"{_base_url(tenant)}{path}", headers=headers, **kwargs)
             response.raise_for_status()
-            return {"ok": True, "data": response.json()}
+            data = response.json() if response.content else None
+            return {"ok": True, "data": data, "status": response.status_code}
     except (httpx.HTTPError, ValueError) as exc:
         observability.event("brasper_api.integration_error", path=path, error=str(exc)[:160])
         return {"ok": False, "error": str(exc)[:160]}
@@ -203,6 +204,14 @@ def find_client(tenant: dict, *, phone: str | None = None, code_phone: str | Non
         "data": body.get("client") if body.get("found") else None,
         "ambiguous": bool(body.get("ambiguous")),
     }
+
+
+def delete_client(tenant: dict, user_id: str) -> dict:
+    """Elimina un perfil creado por el bot usando la credencial privada del servidor."""
+    normalized = (user_id or "").strip()
+    if not normalized:
+        return {"ok": False, "error": "Falta user_id"}
+    return _integration_request(tenant, "DELETE", f"/user/{normalized}")
 
 
 def deposit_accounts(tenant: dict, currency: str) -> dict:

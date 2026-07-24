@@ -333,6 +333,34 @@ def admin_tenant_quote_rates(user: dict = Depends(auth.require("tenants:read")))
     }
 
 
+@router.delete("/api/admin/brasper/clients/{user_id}")
+def admin_brasper_client_delete(
+    user_id: str,
+    expected_name: str = Query(..., min_length=2),
+    user: dict = Depends(auth.require("tenants:write")),
+):
+    """Elimina un perfil Brasper concreto; nombre requerido como guard humano."""
+    tenant = T.get_config()
+    result = brasper_api.delete_client(tenant, user_id)
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=502,
+            detail=f"No se pudo eliminar el perfil Brasper de {expected_name}: {result.get('error')}",
+        )
+    db.add_audit_event(
+        user.get("email"),
+        "brasper.client.delete",
+        f"brasper-user:{user_id}",
+        {"expected_name": expected_name, "status": result.get("status")},
+    )
+    return {
+        "deleted": True,
+        "user_id": user_id,
+        "expected_name": expected_name,
+        "upstream_status": result.get("status"),
+    }
+
+
 @router.post("/api/admin/tenants")
 def admin_tenants_create(body: TenantCreateIn,
                          user: dict = Depends(auth.require("tenants:write"))):
