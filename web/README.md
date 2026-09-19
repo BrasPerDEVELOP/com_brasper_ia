@@ -6,10 +6,9 @@ Panel de agencia con la **arquitectura del plan**: Next.js 16 (App Router) + Typ
 
 ```bash
 cd web
-pnpm install
-pnpm run dev        # desarrollo → http://localhost:3000
+npm run dev        # desarrollo → http://localhost:3000
 # o producción:
-pnpm run build && pnpm run start
+npm run build && npm run start
 ```
 
 El backend debe estar corriendo: `cd ../backend && ../.venv/bin/python -m uvicorn main:app --port 8002`.
