@@ -1,67 +1,37 @@
 # Fase 0 — Unificar Brasper en `backend/` (CRITICAL)
 
-**Estado:** 🔲 Pendiente  
-**PR:** `feat/fase-0-brasper-backend`  
-**Skill:** `brasper-fintech-ia`  
-**Tiempo:** 3–7 días
+**Estado:** ✅ Completada (el legacy `app/` fue eliminado; el repo es single-tenant Brasper)  
+**Skill:** `brasper-fintech-ia`
 
-## Problema
+## Problema original
 
 ```
 Docker → backend/main.py → LangGraph → connectors httpbin (demo)
 Legacy → app/ → BrasperUseCase → apibras.finzeler.com (REAL)
 ```
 
-El launch vende Brasper; prod Docker no usa el motor real.
+El launch vendía Brasper pero prod Docker no usaba el motor real.
 
-## Objetivo
+## Resultado
 
-Cotizaciones, cupones y features remesa disponibles en el path **`backend/`** que Docker ejecuta.
+Cotizaciones, cupones, clientes y cuentas de depósito viven en el path **`backend/`** que Docker ejecuta:
 
----
+| Pieza legacy | Ahora |
+|--------------|-------|
+| `BrasperUseCase` (matemática de cotización) | `backend/core/quotes.py` (portado 1:1: comisión por rangos, cupón sobre comisión, modo recibir) |
+| Conector apibras | `backend/core/brasper_api.py` (TC/comisiones/cupones públicos + endpoints IA privados con `X-Brasper-IA-Secret`) |
+| `RemittancePolicyEngine` (primitivas) | `backend/core/policies.py` (puro, con doctests) |
+| Orquestador | `backend/core/agent_graph.py` (LangGraph): cotización/handoff/onboarding deterministas, LLM solo para chat libre |
+| Multi-tenant JSON + `clinica_demo` | Single-tenant `tenants.brasper` (migración Alembic `0007_remove_multitenant`, `0008_brasper_modeling`) |
 
-## 0.1 — Inventario (1 día)
+### Checklist cerrado
 
-- [ ] Listar exports usados: `BrasperUseCase`, policies, features, tool_router legacy
-- [ ] Mapear endpoints API Brasper (`apibras.finzeler.com`)
-- [ ] Documentar en `FEATURE_MAP.md` (crear si no existe)
+- [x] Cotizador en el grafo sin LLM (`handle_quote`), API Brasper exclusiva, sin fallback local
+- [x] Connectors `httpbin` eliminados del tenant (`externalApis: {}`)
+- [x] `tenants.json`: `quote.api` real, secretos solo por `*_env`, prompt "no inventes tasas"
+- [x] `run_checks.py` reescrito para single-tenant (45 casos, verde)
+- [x] Criterio de aceptación: un mensaje de cotización en Docker **no** puede devolver un número que no venga de la API Brasper (caso 34)
 
-## 0.2 — Port / cableado
+## Siguiente
 
-**Opción A (recomendada):** paquete importable
-
-```
-backend/core/brasper/
-  use_case.py          # wrap o reexport BrasperUseCase
-  policies.py
-  features/
-  tool_bridge.py       # registra tools en tool_router prod
-```
-
-**Opción B:** `PYTHONPATH` incluye `app/` y adapters delgados en `backend/core/`.
-
-- [ ] Elegir A o B y documentar en `AGENTS.md`
-- [ ] `agent_graph` / `tool_router` enruta `quote` / `coupon` a Brasper
-- [ ] Quitar o desactivar connectors `httpbin` del tenant `brasper`
-
-## 0.3 — `tenants.json` Brasper
-
-- [ ] `externalApis` → base URL real + auth desde env (`BRASPER_API_*`)
-- [ ] Tools: cotizar, cupón, (opcional) comisiones
-- [ ] `system_prompt`: “no inventes tasas; usa tools”
-- [ ] Secrets solo en `.env` / compose
-
-## 0.4 — Verificación
-
-- [ ] `POST /api/brasper/chat` con “cotiza 100 USD a BRL” → respuesta con montos de API
-- [ ] Unittest legacy sigue verde
-- [ ] `run_checks.py` verde
-- [ ] Actualizar `00-ROADMAP.md` → Fase 0 ✅
-
-## Criterio de aceptación
-
-Un mensaje de cotización en el stack Docker **no** puede devolver un número que no venga de la API Brasper.
-
-## Prompt
-
-Ver [docs/PROMPT-FASES.md](../PROMPT-FASES.md#fase-0).
+[FASE-1.md](./FASE-1.md) (reglas duras restantes) y [FASE-2.md](./FASE-2.md) (evals golden; CI ya existe).

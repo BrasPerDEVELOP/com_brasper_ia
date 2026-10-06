@@ -56,7 +56,7 @@ def main() -> int:
 
     # 5. Cotización determinista (sin costo LLM). Nota: con la API de Brasper activa
     # la tasa es EN VIVO, así que no se valida un monto fijo, sino la estructura.
-    r = c.post(f"/api/{args.tenant}/chat", headers=headers,
+    r = c.post("/api/chat", headers=headers,
                json={"message": "Cotizar 500 PEN a BRL", "user_ref": "e2e-smoke"})
     d = r.json() if r.status_code == 200 else {}
     resp = d.get("response", "")
@@ -67,10 +67,10 @@ def main() -> int:
           str(d.get("usage")))
 
     # 6. Handoff + derivación a asesor
-    r = c.post(f"/api/{args.tenant}/chat", headers=headers,
+    r = c.post("/api/chat", headers=headers,
                json={"message": "quiero hablar con un asesor", "user_ref": "e2e-smoke-handoff"})
     check("handoff responde", r.status_code == 200 and r.json().get("handoff") is True, r.text[:120])
-    r = c.get(f"/api/{args.tenant}/conversations", headers=headers)
+    r = c.get("/api/conversations", headers=headers)
     conv = next((x for x in r.json().get("conversations", [])
                  if x["user_ref"] == "e2e-smoke-handoff"), {})
     check("conversacion derivada/asignada", conv.get("status") == "handoff",
@@ -78,7 +78,7 @@ def main() -> int:
 
     # 7. LLM real (opt-out con --skip-llm; cuesta centavos de centavo)
     if not args.skip_llm:
-        r = c.post(f"/api/{args.tenant}/chat", headers=headers,
+        r = c.post("/api/chat", headers=headers,
                    json={"message": "hola, en que me ayudas?", "user_ref": "e2e-smoke-llm"})
         d = r.json() if r.status_code == 200 else {}
         check("LLM real responde", r.status_code == 200 and bool(d.get("response")), r.text[:140])
@@ -86,7 +86,7 @@ def main() -> int:
 
     # 8. Operación: usage diario, export, dead-letter, alerts
     for path, name in (("/api/ops/usage-daily", "usage-daily"),
-                       (f"/api/{args.tenant}/export?limit=3", "export conversaciones"),
+                       ("/api/export?limit=3", "export conversaciones"),
                        ("/api/ops/dead-letter", "dead-letter"),
                        ("/api/ops/alerts", "alerts")):
         r = c.get(path, headers=headers)

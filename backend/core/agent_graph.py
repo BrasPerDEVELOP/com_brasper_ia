@@ -308,7 +308,7 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
             amount_send=quote.get("amount_send"),
             amount_receive=quote.get("amount_receive"),
             exchange_rate=quote.get("rate"),
-            fee=quote.get("fee", 0.0)
+            fee=quote.get("commission", 0.0)
         )
     # Regla del proceso: monto alto -> lo confirma un asesor (el bot no cierra solo).
     threshold = _high_amount_threshold()

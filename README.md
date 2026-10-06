@@ -10,7 +10,7 @@ Plataforma gestionada por agencia para operar bots de clientes en WhatsApp, Tele
 ./scripts/stop.sh          # detiene todo
 ```
 
-Requisitos: Postgres corriendo (`brew services start postgresql@16`) y el venv en `.venv/`.
+Requisitos: Postgres corriendo (`brew services start postgresql@16`) y el venv en `.venv/` (raíz del repo, Python 3.12: `python -m venv .venv && .venv/bin/pip install -r requirements.txt`). En Windows el equivalente es `.venv\Scripts\python.exe`.
 **Importante:** el bot de Telegram solo responde si el **poller** (`dev_telegram.py`) está
 activo — `dev.sh` lo levanta. Probar: escribe al bot en Telegram, o abre el panel en
 http://localhost:3000 (`owner@agencia.com` / `demo1234`) → Conversaciones → Brasper.
@@ -84,15 +84,15 @@ En `.agents/skills/` y `.cursor/skills/`:
 
 | Fase | Doc |
 |---|---|
-| **0** Unificar Brasper en `backend/` (CRITICAL) | [docs/plans/FASE-0.md](docs/plans/FASE-0.md) |
-| 1 Vertical Remesas + anti-alucinacion | [docs/plans/FASE-1.md](docs/plans/FASE-1.md) |
-| 2 CI + evals + smoke | [docs/plans/FASE-2.md](docs/plans/FASE-2.md) |
+| **0** Unificar Brasper en `backend/` | ✅ Hecho — [docs/plans/FASE-0.md](docs/plans/FASE-0.md) |
+| 1 Vertical Remesas + anti-alucinacion | 🟡 Parcial — [docs/plans/FASE-1.md](docs/plans/FASE-1.md) |
+| 2 CI + evals + smoke | 🟡 CI y smoke listos — [docs/plans/FASE-2.md](docs/plans/FASE-2.md) |
 | 3 FAQ / RAG ligero | [docs/plans/FASE-3.md](docs/plans/FASE-3.md) |
 | 4 Launch ops | [docs/plans/FASE-4.md](docs/plans/FASE-4.md) |
 
 Indice: [`docs/plans/00-ROADMAP.md`](docs/plans/00-ROADMAP.md) · Prompts: [`docs/PROMPT-FASES.md`](docs/PROMPT-FASES.md) · Mapa: [`FEATURE_MAP.md`](FEATURE_MAP.md)
 
-Empezar por Fase 0: el Docker actual no usa el motor de cotizaciones real de `app/`.
+Fase 0 cerrada: el motor de cotizaciones real (API Brasper) vive en `backend/core/quotes.py` + `brasper_api.py`; el legacy `app/` fue eliminado. Gate local: `cd backend && ../.venv/bin/python tests/run_checks.py` (45 casos, sin LLM real). CI: `.github/workflows/ci.yml`.
 
 ## Estado Honesto
 

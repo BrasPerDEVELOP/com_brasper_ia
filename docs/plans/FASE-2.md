@@ -1,6 +1,6 @@
 # Fase 2 — CI, evals y smoke
 
-**Estado:** 🔲 Pendiente  
+**Estado:** 🟡 Parcial — 2.1 CI y 2.3 smoke listos; 2.2 evals golden pendiente  
 **PR:** `feat/fase-2-ci-evals`  
 **Skill:** `brasper-ia-audit`
 
@@ -12,7 +12,7 @@
 
 ## 2.1 — CI
 
-Crear `.github/workflows/ci.yml` y `.gitea/workflows/ci.yml`:
+Existe `.github/workflows/ci.yml` (backend `run_checks` + doctests; panel `tsc` + `next build`). Gitea pendiente si se usa:
 
 ```yaml
 # jobs:
@@ -21,7 +21,7 @@ Crear `.github/workflows/ci.yml` y `.gitea/workflows/ci.yml`:
 #  - optional: web build
 ```
 
-- [ ] Workflow en PR a `main` / `develop`
+- [x] Workflow en PR y push a `main`
 - [ ] Secrets de test (API key mock o staging) documentados
 
 ## 2.2 — Suite eval (golden)
@@ -43,8 +43,8 @@ Crear `backend/tests/evals/` o `tests/evals/`:
 
 `scripts/smoke_brasper.sh`:
 
-- [ ] `GET /health`
-- [ ] `POST /api/brasper/chat` (token ops)
+- [x] `GET /health`
+- [x] `POST /api/chat` (token)
 - [ ] Opcional: ping API Brasper
 
 Documentar en `backend/RUNBOOK.md`.

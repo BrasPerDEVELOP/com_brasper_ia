@@ -8,9 +8,9 @@
 
 | Fase | Nombre | Estado | Doc | PR sugerido |
 |------|--------|--------|-----|-------------|
-| **0** | Unificar lógica Brasper en prod | 🔲 **EMPEZAR AQUÍ** | [FASE-0.md](./FASE-0.md) | `feat/fase-0-brasper-backend` |
-| **1** | Vertical Remesas + anti-alucinación hard | 🔲 | [FASE-1.md](./FASE-1.md) | `feat/fase-1-remesas-policies` |
-| **2** | CI + evals + smoke | 🔲 | [FASE-2.md](./FASE-2.md) | `feat/fase-2-ci-evals` |
+| **0** | Unificar lógica Brasper en prod | ✅ Hecho | [FASE-0.md](./FASE-0.md) | `feat/fase-0-brasper-backend` |
+| **1** | Vertical Remesas + anti-alucinación hard | 🟡 Parcial (cotizador/guards en `run_checks`) | [FASE-1.md](./FASE-1.md) | `feat/fase-1-remesas-policies` |
+| **2** | CI + evals + smoke | 🟡 CI (`.github/workflows/ci.yml`) y smoke listos; evals golden pendientes | [FASE-2.md](./FASE-2.md) | `feat/fase-2-ci-evals` |
 | **3** | Conocimiento (FAQ/RAG ligero) | 🔲 | [FASE-3.md](./FASE-3.md) | `feat/fase-3-knowledge` |
 | **4** | Launch ops (disclaimers, legal, runbook) | 🔲 | [FASE-4.md](./FASE-4.md) | `feat/fase-4-launch-ops` |
 
@@ -20,13 +20,13 @@
 0 (CRITICAL) → 1 → 2 → 3 (opcional pre-launch) → 4
 ```
 
-**Por qué 0 primero:** Docker corre `backend/`; cotizaciones reales están en `app/`. Sin Fase 0 el bot en prod **no es el Brasper real**.
+**Fase 0 cerrada:** el legacy `app/` fue eliminado; `backend/core/quotes.py` + `brasper_api.py` cotizan con la API real. Seguir con 1 y 2.
 
 ## Gate antes de cada PR
 
 ```bash
-cd backend && python tests/run_checks.py
-cd .. && python -m unittest discover -s tests -v
+cd backend && ../.venv/bin/python tests/run_checks.py   # 45 casos, sin LLM real
+cd backend && ../.venv/bin/python -m doctest core/policies.py
 ```
 
 ## Relación con PLAN_PLATAFORMA.md
@@ -39,11 +39,11 @@ cd .. && python -m unittest discover -s tests -v
 
 ## Definition of Done — listo para lanzar Brasper
 
-- [ ] Tenant `brasper` usa API real (no httpbin)
-- [ ] Cotización / cupón vía tool, LLM no inventa montos
-- [ ] Tests anti-alucinación verdes en CI
-- [ ] Disclaimer referencial en quotes
-- [ ] Smoke post-deploy documentado
+- [x] Tenant `brasper` usa API real (no httpbin)
+- [x] Cotización / cupón vía tool, LLM no inventa montos
+- [x] Tests anti-alucinación verdes en CI (`run_checks` caso 34)
+- [x] Disclaimer referencial en quotes
+- [x] Smoke post-deploy (`backend/tests/e2e_smoke.py`)
 - [ ] `POLITICAS.md` revisado por legal (o disclaimer “plantilla” visible)
 
 ## Prompts Cursor

@@ -4,7 +4,10 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-import dateparser
+try:
+    import dateparser  # type: ignore
+except ImportError:  # dependencia opcional (solo verticales con citas)
+    dateparser = None
 
 from . import db
 from .util import normalize_text
@@ -80,6 +83,8 @@ def _extract_datetime(text: str) -> str | None:
     if iso:
         hour = iso.group(2) or "09:00"
         return f"{iso.group(1)}T{hour}:00+00:00"
+    if dateparser is None:
+        return None
     parsed = dateparser.parse(
         text,
         languages=["es", "en", "pt"],

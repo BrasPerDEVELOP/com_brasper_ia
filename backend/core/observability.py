@@ -44,7 +44,8 @@ def event(name: str, **fields: Any) -> None:
 
 def metrics_snapshot() -> dict:
     usage = db.usage_summary()
-    tenant_count = len({row["tenant_id"] for row in usage})
+    # usage_summary() sin filtro no trae tenant_id (single-tenant): cuenta filas con consumo.
+    tenant_count = sum(1 for row in usage if int(row.get("calls") or 0) > 0)
     total_calls = sum(int(row.get("calls") or 0) for row in usage)
     total_cost = round(sum(float(row.get("cost_usd") or 0) for row in usage), 6)
     return {

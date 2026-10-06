@@ -1,12 +1,14 @@
 # AGENTS.md — com_brasper_ia (Cauce / Brasper Bot)
 
-Plataforma IA multi-tenant para bots (WhatsApp, Telegram, webchat). Stack: **FastAPI + LangGraph + Postgres + Redis** (`backend/`) + panel **Next.js** (`web/`). Lógica fintech Brasper (cotizaciones, anti-alucinación) vive hoy en legacy `app/` — **prioridad: unificar en `backend/`**.
+Bot IA de Brasper (remesas Perú↔Brasil) para WhatsApp, Telegram y webchat, con panel de operación. Stack: **FastAPI + LangGraph + Postgres + Redis** (`backend/`) + panel **Next.js** (`web/`).
+
+**Estado del stack:** el repo es **single-tenant Brasper** y toda la lógica fintech (cotizador, API Brasper en vivo, onboarding, handoff) vive en `backend/core/`. El legacy `app/` ya no existe (Fase 0 completada). Si un doc viejo menciona `app/`, `BrasperUseCase` o `clinica_demo`, está desactualizado.
 
 ## Skills (`.agents/skills/` y `.cursor/skills/`)
 
 | Skill | Cuándo usar |
 |-------|-------------|
-| **brasper-ia-audit** | Auditoría pre-launch, dual stack, CI, tenant isolation, "limpiar / auditar bot" |
+| **brasper-ia-audit** | Auditoría pre-launch, CI, "limpiar / auditar bot" |
 | **brasper-fintech-ia** | Cotizaciones, tools obligatorias, anti-alucinación, RAG/FAQ, citations fintech |
 | **brainstorming** | Antes de features nuevas (canal, vertical, tool, RAG) |
 | **thermo-nuclear-code-quality-review** | God files en orchestrators, spaghetti en policies/graph |
@@ -23,67 +25,76 @@ Plataforma IA multi-tenant para bots (WhatsApp, Telegram, webchat). Stack: **Fas
 ```
 1. brainstorming              → feature nueva
 2. brasper-fintech-ia         → tools, policies, RAG, citations
-3. Implementar en backend/    → NUNCA solo en app/ si es prod Docker
+3. Implementar en backend/core/ + caso nuevo en backend/tests/run_checks.py
 4. brasper-ia-audit           → pre-merge / pre-launch
 5. thermo-nuclear             → review de graph/orchestrator
 ```
 
-## Capas de validación (estilo Stemis)
+## Capas de validación
 
 | Capa | Comando / artefacto |
 |------|---------------------|
-| 1 Local | `cd backend && python tests/run_checks.py` + `python -m unittest discover -s tests` (raíz) |
-| 2 CI PR | Workflow Gitea/GitHub (pendiente) — ambos suites |
-| 3 Gate | Evals: quote API, anti-hallucination, handoff |
-| 4 Deploy | Smoke: chat tenant + webhook + cotización real |
+| 1 Local | `cd backend && ../.venv/bin/python tests/run_checks.py` (Windows: `..\.venv\Scripts\python.exe tests\run_checks.py`) + `python -m doctest core/policies.py` |
+| 2 CI PR | `.github/workflows/ci.yml` — backend `run_checks` + doctests, panel `tsc` + `next build` |
+| 3 Gate | Casos del propio `run_checks`: cotizador sin LLM, anti-alucinación (API exclusiva), handoff, onboarding |
+| 4 Deploy | `backend/tests/e2e_smoke.py` contra el servidor vivo: health + login + cotización + handoff |
+
+Entorno local: Python 3.12 en `.venv/` (raíz del repo), deps en `requirements.txt` (raíz). El panel usa `npm ci` en `web/`.
 
 Ver `backend/DEPLOY.md`, `backend/RUNBOOK.md`, `PLAN_PLATAFORMA.md`.
 
 ## Arquitectura crítica (no romper)
 
 ```
-Docker prod → backend/main.py → LangGraph (agent_graph) → tools / LLM
-Legacy      → main.py + app/  → BrasperUseCase + RemittancePolicyEngine
+Canal (WhatsApp/Telegram/webchat) → api/routes.py → core/engine.py (lock Redis)
+  → core/agent_graph.py (LangGraph)
+      ├─ quotes.py (determinista, SIN LLM) → brasper_api.py (TC/comisiones/cupones en vivo)
+      ├─ lead_onboarding.py (identidad progresiva, clientes Brasper, cuentas de depósito)
+      ├─ handoff → auth.derive_to_advisor (asesor con menos carga)
+      ├─ tool_router.py → connectors.py (externalApis declarativas)
+      └─ llm.py (DeepSeek / OpenAI-compatible) solo para conversación libre
 ```
 
-**Regla de launch:** cotizaciones, cupones y montos **solo** vía tool/API (`BrasperUseCase` / connectors reales). El LLM **no inventa tasas**.
+**Regla de launch:** cotizaciones, cupones, montos y cuentas **solo** vía `quotes.py` / `brasper_api.py`. El LLM **no inventa tasas**. Si la API Brasper falla, el cotizador rechaza la cotización (nunca usa una tasa local como respaldo).
 
-**Regla de stack:** cambios de producto Brasper van a `backend/core/` (o librería importada desde `app/`). No dejar lógica crítica solo en `app/` si Docker no la ejecuta.
+**Regla de canal:** el asesor atiende dentro del mismo chat (takeover). El bot **nunca** deriva a WhatsApp externo ni redes; `agent_graph.sanitize_no_external_channels` lo garantiza a la entrada y salida del LLM.
+
+**Regla de config:** `backend/config/tenants.json` solo guarda referencias `*_env`; los secretos van en `.env` / Dokploy. La Admin API rechaza secretos crudos en producción.
 
 ## Capas del bot
 
 | Capa | Dónde |
 |------|-------|
 | Canales | `backend/core/whatsapp.py`, `telegram.py`, webhooks en `api/routes.py` |
-| Orquestación | `backend/core/agent_graph.py` |
-| LLM | `backend/core/llm.py` (DeepSeek / OpenAI-compatible) |
-| Tools | `backend/core/tool_router.py` + connectors tenant |
-| Fintech (legacy) | `app/application/brasper_use_case.py`, `policies/`, `features/` |
-| Tenants | `backend/config/tenants.json` + Admin API |
+| Orquestación | `backend/core/agent_graph.py` (+ `engine.py` lock por conversación) |
+| LLM | `backend/core/llm.py` |
+| Cotizador | `backend/core/quotes.py` + `brasper_api.py` + `policies.py` (primitivas puras) |
+| Onboarding / clientes | `backend/core/lead_onboarding.py` |
+| Tools genéricas | `backend/core/tool_router.py` + `connectors.py` |
+| Config | `backend/config/tenants.json` (`tenants.brasper`) + Admin API |
 | Panel | `web/` (Next.js) |
 
 ## Convenciones
 
-- Español en respuestas del bot y docs de producto
-- Inglés en código (nombres de módulos/funciones)
+- Español en respuestas del bot y docs de producto; inglés en código
 - Secrets solo en env / Dokploy — nunca en `tenants.json` commiteado
-- Cada tool fintech: test de anti-alucinación (ver `tests/test_chat_architecture.py`)
-- Tenant isolation: conversaciones, usage y docs RAG siempre con `tenant_id`
+- Cada regla fintech nueva lleva un caso en `backend/tests/run_checks.py` (sin LLM real, sin red)
+- Flujos del grafo deterministas (cotización, handoff, onboarding) devuelven `usage: None`: no gastan LLM
 
 ## Invocación en Cursor
 
 - *"Usa brasper-ia-audit y genera el reporte de launch"*
-- *"Usa brasper-fintech-ia para portar BrasperUseCase a backend/"*
+- *"Usa brasper-fintech-ia para añadir la tool X en backend/core/"*
 - *"thermo-nuclear en agent_graph.py"*
-- *"brainstorming: RAG FAQ por tenant"*
+- *"brainstorming: RAG FAQ Brasper"*
 
 ## Roadmap de mejoras (launch Brasper)
 
 | Fase | Estado | Doc |
 |------|--------|-----|
-| **0** Unificar Brasper en `backend/` | 🔲 **EMPEZAR** | [docs/plans/FASE-0.md](docs/plans/FASE-0.md) |
-| **1** Vertical Remesas + anti-alucinación | 🔲 | [docs/plans/FASE-1.md](docs/plans/FASE-1.md) |
-| **2** CI + evals + smoke | 🔲 | [docs/plans/FASE-2.md](docs/plans/FASE-2.md) |
+| **0** Unificar Brasper en `backend/` | ✅ Hecho | [docs/plans/FASE-0.md](docs/plans/FASE-0.md) |
+| **1** Vertical Remesas + anti-alucinación | 🟡 Parcial (en `quotes.py` / `run_checks`) | [docs/plans/FASE-1.md](docs/plans/FASE-1.md) |
+| **2** CI + evals + smoke | 🟡 CI y smoke listos; evals golden pendientes | [docs/plans/FASE-2.md](docs/plans/FASE-2.md) |
 | **3** FAQ / RAG ligero | 🔲 | [docs/plans/FASE-3.md](docs/plans/FASE-3.md) |
 | **4** Launch ops | 🔲 | [docs/plans/FASE-4.md](docs/plans/FASE-4.md) |
 
