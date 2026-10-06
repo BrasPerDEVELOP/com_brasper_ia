@@ -98,7 +98,7 @@ Canal (WhatsApp/Telegram/webchat) → api/routes.py → core/engine.py (lock Red
 | **3** FAQ / RAG ligero | 🔲 | [docs/plans/FASE-3.md](docs/plans/FASE-3.md) |
 | **4** Launch ops | 🔲 | [docs/plans/FASE-4.md](docs/plans/FASE-4.md) |
 
-Índice: [docs/plans/00-ROADMAP.md](docs/plans/00-ROADMAP.md)  
+Índice: [docs/plans/00-ROADMAP.md](docs/plans/00-ROADMAP.md) · Plan de mejoras: [docs/plans/PLAN-MEJORAS-2026-10.md](docs/plans/PLAN-MEJORAS-2026-10.md)  
 Mapa: [FEATURE_MAP.md](FEATURE_MAP.md)  
 Prompts: [docs/PROMPT-FASES.md](docs/PROMPT-FASES.md)
 

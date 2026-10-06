@@ -4,6 +4,8 @@
 > Este plan prioriza el **producto Brasper fintech** que se está lanzando.  
 > Skills: `brasper-ia-audit`, `brasper-fintech-ia` · Ver `AGENTS.md`.
 
+> Plan detallado por sprints: [PLAN-MEJORAS-2026-10.md](./PLAN-MEJORAS-2026-10.md)
+
 ## Estado por fase
 
 | Fase | Nombre | Estado | Doc | PR sugerido |
