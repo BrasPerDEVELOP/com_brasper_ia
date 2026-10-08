@@ -1,5 +1,5 @@
 "use client";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import Icon from "@/components/Icon";
 
@@ -11,6 +11,9 @@ export default function Chat() {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const convId = useRef<string | null>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => { boxRef.current?.scrollTo({ top: boxRef.current.scrollHeight, behavior: "smooth" }); }, [bubbles, busy]);
 
   async function send() {
     const msg = text.trim();
@@ -24,34 +27,35 @@ export default function Chat() {
       });
       convId.current = r.conversation_id;
       const meta = r.handoff ? "handoff · sin costo LLM"
-        : r.usage ? `${r.usage.model} · ${r.usage.tokens_in}→${r.usage.tokens_out} tok · US$ ${r.usage.cost_usd}` : "";
+        : r.usage ? `${r.usage.model} · ${r.usage.tokens_in}→${r.usage.tokens_out} tok · US$ ${r.usage.cost_usd}` : "determinista · sin costo LLM";
       setBubbles(b => [...b, { role: "assistant", text: r.response, meta }]);
     } catch (e) {
       setBubbles(b => [...b, { role: "assistant", text: "⚠️ " + (e as Error).message }]);
     } finally { setBusy(false); }
   }
 
+  function reset() { setBubbles([]); convId.current = null; }
+
   return (
     <>
       <div className="card-head">
         <div>
-          <h3>Prueba del Bot</h3>
-          <div className="muted" style={{ fontSize: 12 }}>
-            Simula un chat de WhatsApp con la IA
-          </div>
+          <h3>Chat de prueba</h3>
+          <div className="muted" style={{ fontSize: 12.5 }}>Simula un cliente escribiendo al bot real. <span className="tag warn">Consume LLM</span></div>
         </div>
+        <button className="btn btn-ghost btn-sm" onClick={reset} disabled={!bubbles.length}><Icon name="refresh" size={14} /> Nueva conversación</button>
       </div>
-      <div className="thread" style={{ height: "calc(100vh - 200px)" }}>
-        <div className="msgs">
+      <div className="thread card-like" style={{ height: "calc(100dvh - var(--hdr-h) - 120px)", minHeight: 360 }}>
+        <div className="msgs" ref={boxRef}>
           {bubbles.length ? bubbles.map((b, i) => (
-            <div key={i} className={"msg " + b.role}>{b.text}{b.meta && <small>{b.meta}</small>}</div>
-          )) : <div className="empty">Escribe abajo — cada respuesta llama al bot real y cuesta una fracción de centavo.</div>}
-          {busy && <div className="msg assistant">…</div>}
+            <div key={i} className={"msg " + b.role}>{b.text}{b.meta && <small className="ts">{b.meta}</small>}</div>
+          )) : <div className="empty">Escribe abajo. Cada respuesta llama al bot real; las cotizaciones y el handoff no gastan LLM.</div>}
+          {busy && <div className="msg assistant pending">…</div>}
         </div>
         <div className="chatbar">
-          <input value={text} placeholder="Escribe un mensaje…" onChange={e => setText(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter") send(); }} />
-          <button className="btn" onClick={send} disabled={busy}><Icon name="send" size={16} /></button>
+          <input value={text} placeholder="Escribe como si fueras el cliente…" onChange={e => setText(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") send(); }} disabled={busy} aria-label="Mensaje" />
+          <button className="btn" onClick={send} disabled={busy || !text.trim()} aria-label="Enviar"><Icon name="send" size={16} /></button>
         </div>
       </div>
     </>

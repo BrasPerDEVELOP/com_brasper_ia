@@ -26,7 +26,7 @@ export default function Plantillas() {
       <div className="usage-note">Plantillas HSM: los únicos mensajes que puedes iniciar fuera de la ventana de 24 h. El envío real requiere el token de WhatsApp del cliente.</div>
       <table><thead><tr><th>Nombre</th><th>Categoría</th><th>Idioma</th><th>Estado</th><th className="num">Vars</th><th>Cuerpo</th></tr></thead>
         <tbody>{tpls.length ? tpls.map(t => (
-          <tr key={t.name}><td className="mono" style={{ fontSize: 12 }}>{t.name}</td><td><span className="tag">{t.category}</span></td><td className="muted">{t.language}</td><td><span className="tag" style={{ background: "var(--accent-soft)", color: "var(--accent-d)" }}>{t.status}</span></td><td className="num">{t.variables}</td><td style={{ fontSize: 12 }}>{t.body}</td></tr>
+          <tr key={t.name}><td className="mono" style={{ fontSize: 12 }}>{t.name}</td><td><span className="tag">{t.category}</span></td><td className="muted">{t.language}</td><td><span className={"tag " + (String(t.status).toUpperCase() === "APPROVED" ? "ok" : "info")}>{t.status}</span></td><td className="num">{t.variables}</td><td style={{ fontSize: 12 }}>{t.body}</td></tr>
         )) : <tr><td colSpan={6} className="empty">Sin plantillas</td></tr>}</tbody></table>
       <h3 className="sec-title">Enviar plantilla</h3>
       <form className="row" onSubmit={send}>

@@ -69,11 +69,14 @@ export default function BotConfig() {
 
   return (
     <>
-      <div className="row">
-        <span className="grow" />
+      <div className="card-head" style={{ alignItems: "center" }}>
+        <div>
+          <h3>Bot y prompt</h3>
+          <div className="muted" style={{ fontSize: 12.5 }}>Personalidad, modelo, derivación y cotizador. Tasas y comisiones vienen en vivo de la API Brasper.</div>
+        </div>
         <button className="btn" onClick={save} disabled={saving || !cfg}>{saving ? "Guardando…" : "Guardar cambios"}</button>
       </div>
-      {note && <div className="usage-note" style={!note.ok ? { background: "#fdecec", color: "#8f1d1d" } : undefined}>{note.text}</div>}
+      {note && <div className={"usage-note" + (note.ok ? "" : " err")}>{note.text}</div>}
       {!cfg ? <div className="empty">Cargando configuración...</div> : (
         <div className="cards" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))" }}>
           <div className="card">
@@ -127,7 +130,7 @@ export default function BotConfig() {
               {liveRates.map(item => (
                 <div className="kv" key={item.pair}>
                   <span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{item.pair}</span>
-                  <b style={{ fontFamily: "var(--mono)" }}>{item.rate.toFixed(4)}</b>
+                  <b style={{ fontFamily: "var(--mono)" }} title={item.updated_at ? `Actualizada ${item.updated_at}` : undefined}>{item.rate.toFixed(4)}</b>
                 </div>
               ))}
               <p className="muted" style={{ fontSize: 11, marginTop: 8 }}>{ratesNote}. Tasas, comisiones y cupones son de solo lectura.</p>
