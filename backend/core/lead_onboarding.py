@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 from core import tenants as T
-from . import brasper_api, db, util
+from . import brasper_api, db, util, idempotency, tool_contracts
 
 
 _DOC_TYPES = {
@@ -258,7 +258,22 @@ def process(cid: str, text: str, channel: str, user_ref: str,
     if next_stage != "sync":
         return {"response": _next_prompt(next_stage), "handoff": False, "usage": None}
 
-    result = brasper_api.upsert_client(tenant, lead)
+    # Alta/actualización vía contrato tipado con clave de idempotencia (misma persona =
+    # mismo resultado) y verificación tras timeout (consultar antes de repetir la escritura).
+    idem = idempotency.make_key("client.upsert", lead.get("codigo_telefono"), lead.get("telefono"),
+                                lead.get("tipo_documento"), lead.get("numero_documento"))
+    run = tool_contracts.run("client.upsert", {"lead": lead},
+                             lambda lead: brasper_api.upsert_client(tenant, lead), idempotency_key=idem)
+    if run.get("ok"):
+        result = run["data"]
+    elif run.get("error_code") == "timeout":
+        found = brasper_api.find_client(tenant, phone=lead.get("telefono"), code_phone=lead.get("codigo_telefono"))
+        if found.get("ok") and found.get("data") and found["data"].get("id") is not None:
+            result = {"ok": True, "data": {"id": found["data"]["id"], "created": False}}
+        else:
+            result = {"ok": False, "error": "timeout"}
+    else:
+        result = {"ok": False, "error": run.get("detail")}
     if not result.get("ok"):
         db.merge_lead_data(cid, {"commercial_stage": "sync_error"})
         return {

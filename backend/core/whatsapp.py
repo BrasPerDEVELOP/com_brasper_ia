@@ -41,10 +41,17 @@ def verify_signature(raw_body: bytes, signature_header: str | None) -> bool:
     return hmac.compare_digest(signature_header or "", expected)
 
 
-async def send_text(to: str, text: str) -> dict:
+def _creds(connection: dict | None) -> tuple[str | None, str | None, dict]:
+    """(token, phone_number_id, tenant) de la conexión indicada o de la principal."""
     tenant = T.get_config()
-    token = T.whatsapp_token(tenant)
-    pnid = T.whatsapp_phone_number_id(tenant)
+    conn = connection or T.whatsapp_connection_by_id(None, tenant)
+    if conn:
+        return conn.get("token"), conn.get("phone_number_id"), tenant
+    return T.whatsapp_token(tenant), T.whatsapp_phone_number_id(tenant), tenant
+
+
+async def send_text(to: str, text: str, connection: dict | None = None) -> dict:
+    token, pnid, tenant = _creds(connection)
     if not token or not pnid:
         return {"sent": False, "reason": f"Tenant {tenant['id']}: WhatsApp sin token/phone_number_id"}
     payload = {
@@ -61,11 +68,9 @@ async def send_text(to: str, text: str) -> dict:
     return {"sent": ok, "status": r.status_code, "detail": None if ok else r.text[:200]}
 
 
-async def upload_media(filename: str, content: bytes, mime: str) -> dict:
+async def upload_media(filename: str, content: bytes, mime: str, connection: dict | None = None) -> dict:
     """Sube un archivo a WhatsApp (POST /{pnid}/media) y devuelve su media_id."""
-    tenant = T.get_config()
-    token = T.whatsapp_token(tenant)
-    pnid = T.whatsapp_phone_number_id(tenant)
+    token, pnid, tenant = _creds(connection)
     if not token or not pnid:
         return {"ok": False, "reason": f"Tenant {tenant['id']}: WhatsApp sin token/phone_number_id"}
     files = {"file": (filename or "archivo", content, mime or "application/octet-stream")}
@@ -79,14 +84,12 @@ async def upload_media(filename: str, content: bytes, mime: str) -> dict:
 
 
 async def send_image_upload(to: str, filename: str, content: bytes,
-                            mime: str, caption: str = "") -> dict:
+                            mime: str, caption: str = "", connection: dict | None = None) -> dict:
     """Sube la imagen y la envía por WhatsApp usando su media_id (sin URL pública)."""
-    tenant = T.get_config()
-    up = await upload_media(filename, content, mime)
+    up = await upload_media(filename, content, mime, connection=connection)
     if not up.get("ok"):
         return {"sent": False, "reason": up.get("detail") or up.get("reason")}
-    token = T.whatsapp_token(tenant)
-    pnid = T.whatsapp_phone_number_id(tenant)
+    token, pnid, _tenant = _creds(connection)
     image: dict = {"id": up["id"]}
     if caption:
         image["caption"] = caption[:1024]
@@ -100,11 +103,9 @@ async def send_image_upload(to: str, filename: str, content: bytes,
             "media_id": up.get("id")}
 
 
-async def send_image(to: str, link: str, caption: str = "") -> dict:
+async def send_image(to: str, link: str, caption: str = "", connection: dict | None = None) -> dict:
     """Envía una imagen por WhatsApp Cloud API (type=image). `link` es una URL pública."""
-    tenant = T.get_config()
-    token = T.whatsapp_token(tenant)
-    pnid = T.whatsapp_phone_number_id(tenant)
+    token, pnid, tenant = _creds(connection)
     if not token or not pnid:
         return {"sent": False, "reason": f"Tenant {tenant['id']}: WhatsApp sin token/phone_number_id"}
     image: dict = {"link": link}
@@ -119,51 +120,77 @@ async def send_image(to: str, link: str, caption: str = "") -> dict:
     return {"sent": ok, "status": r.status_code, "detail": None if ok else r.text[:200]}
 
 
-def parse_incoming(body: dict) -> list[dict]:
-    """Extrae mensajes de texto/audio del payload del webhook de Meta.
+_CONTACT_STD_KEYS = {"profile", "wa_id"}
 
-    Devuelve items con type='text' o type='audio' — puede venir más de uno.
+
+def _contact_for(value: dict, wa_from: str | None) -> dict:
+    """Identidad del remitente según `contacts[]`: nombre de perfil, wa_id y cualquier
+    campo adicional que Meta añada (p. ej. identificadores con alcance de negocio o
+    username). Los campos extra se conservan tal cual en `identity` para no asumir
+    nombres de campo no confirmados (ver plan: BSUID/usernames)."""
+    for c in value.get("contacts", []) or []:
+        if not isinstance(c, dict):
+            continue
+        if wa_from and c.get("wa_id") and str(c["wa_id"]) != str(wa_from):
+            continue
+        profile = c.get("profile") or {}
+        extra = {k: v for k, v in c.items() if k not in _CONTACT_STD_KEYS}
+        return {"wa_id": c.get("wa_id"), "profile_name": profile.get("name"), "identity": extra or None}
+    return {"wa_id": wa_from, "profile_name": None, "identity": None}
+
+
+def parse_incoming(body: dict) -> list[dict]:
+    """Extrae eventos del payload del webhook de Meta.
+
+    Tipos devueltos: 'text', 'audio', 'image'|'document'|'video'|'sticker' (mensajes
+    del cliente, con `id`, `timestamp` y `contact`), 'status' (entregas), 'echo'
+    (mensaje enviado desde la app WhatsApp Business en modo coexistencia:
+    `smb_message_echoes`), 'history' y 'state_sync' (sincronización Coex; solo se
+    registran, nunca disparan respuestas). Puede venir más de uno.
     """
     out = []
     for entry in body.get("entry", []):
         for change in entry.get("changes", []):
-            value = change.get("value", {})
-            pnid = value.get("metadata", {}).get("phone_number_id")
-            for msg in value.get("messages", []):
+            value = change.get("value", {}) or {}
+            field = change.get("field") or "messages"
+            pnid = (value.get("metadata", {}) or {}).get("phone_number_id")
+            if field == "smb_message_echoes":
+                for m in value.get("message_echoes", []) or []:
+                    out.append({"type": "echo", "phone_number_id": pnid, "id": m.get("id"),
+                                "to": m.get("to"), "timestamp": m.get("timestamp"),
+                                "text": ((m.get("text") or {}).get("body") if m.get("type") == "text" else None),
+                                "kind": m.get("type")})
+                continue
+            if field in ("history", "smb_app_state_sync"):
+                out.append({"type": "history" if field == "history" else "state_sync",
+                            "phone_number_id": pnid, "raw_keys": sorted(value.keys())})
+                continue
+            for st in value.get("statuses", []) or []:
+                out.append({"type": "status", "phone_number_id": pnid, "id": st.get("id"),
+                            "status": st.get("status"), "recipient": st.get("recipient_id"),
+                            "timestamp": st.get("timestamp")})
+            for msg in value.get("messages", []) or []:
+                base = {"phone_number_id": pnid, "from": msg.get("from"), "id": msg.get("id"),
+                        "timestamp": msg.get("timestamp"), "contact": _contact_for(value, msg.get("from"))}
                 if msg.get("type") == "text":
-                    out.append({
-                        "type": "text",
-                        "phone_number_id": pnid,
-                        "from": msg.get("from"),
-                        "text": msg.get("text", {}).get("body", ""),
-                    })
+                    out.append({**base, "type": "text", "text": msg.get("text", {}).get("body", "")})
                 elif msg.get("type") == "audio":
                     audio = msg.get("audio", {}) or {}
-                    out.append({
-                        "type": "audio",
-                        "phone_number_id": pnid,
-                        "from": msg.get("from"),
-                        "media_id": audio.get("id"),
-                        "mime_type": audio.get("mime_type"),
-                    })
+                    out.append({**base, "type": "audio", "media_id": audio.get("id"),
+                                "mime_type": audio.get("mime_type")})
                 elif msg.get("type") in ("image", "document", "video", "sticker"):
                     obj = msg.get(msg["type"], {}) or {}
-                    out.append({
-                        "type": msg["type"],
-                        "phone_number_id": pnid,
-                        "from": msg.get("from"),
-                        "media_id": obj.get("id"),
-                        "mime_type": obj.get("mime_type"),
-                        "filename": obj.get("filename"),
-                        "caption": obj.get("caption"),
-                    })
+                    out.append({**base, "type": msg["type"], "media_id": obj.get("id"),
+                                "mime_type": obj.get("mime_type"), "filename": obj.get("filename"),
+                                "caption": obj.get("caption")})
+                else:
+                    out.append({**base, "type": "unsupported", "kind": msg.get("type")})
     return out
 
 
-async def download_media(media_id: str) -> tuple[bytes | None, str | None]:
+async def download_media(media_id: str, connection: dict | None = None) -> tuple[bytes | None, str | None]:
     """Descarga un archivo entrante de WhatsApp por media_id (GET media -> url -> bytes)."""
-    tenant = T.get_config()
-    token = T.whatsapp_token(tenant)
+    token, _pnid, _tenant = _creds(connection)
     if not token:
         return None, None
     headers = {"Authorization": f"Bearer {token}"}

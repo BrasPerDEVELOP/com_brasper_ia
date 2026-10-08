@@ -378,7 +378,8 @@ def case_admin_tenant_api():
 # ---------------------------------------------------------------------------
 def case_langgraph_llm_path():
     tenant = T.get_config()
-    out = _run(engine.handle_message("user-langgraph", "hola, que documentos necesito?"))
+    # Pregunta general sin intencion detectable (las de documentos ya las resuelve la FAQ con fuente).
+    out = _run(engine.handle_message("user-langgraph", "hola, tengo una duda general sobre su servicio"))
     assert out["handoff"] is False, out
     assert out["response"] == "[respuesta simulada]", out
     assert out["usage"]["model"] == tenant.get("llm", {}).get("model"), out["usage"]
@@ -672,9 +673,10 @@ def case_quote_graph_path():
     assert out4["usage"] is None, out4
     assert "PEN" in out4["response"] and "USD" in out4["response"], out4["response"]
 
-    # Senal debil sin datos ("envio" como sustantivo) NO cae al cotizador.
+    # Senal debil sin datos ("envio" como sustantivo) NO cae al cotizador: la resuelve la
+    # FAQ aprobada con fuente (sin LLM), no el cotizador ni una alucinacion.
     out5 = _run(engine.handle_message("user-quote-doc", "que documentos necesito para el envio?"))
-    assert out5["response"] == "[respuesta simulada]", out5["response"]
+    assert out5["usage"] is None and "DNI" in out5["response"] and "Fuente" in out5["response"], out5["response"]
 
 
 # ---------------------------------------------------------------------------
@@ -763,7 +765,7 @@ def case_agent_scoping_and_images():
 
     old_img = whatsapp.send_image
 
-    async def _fake_image(to, link, caption=""):
+    async def _fake_image(to, link, caption="", **kw):
         return {"sent": True}
 
     whatsapp.send_image = _fake_image
@@ -1354,6 +1356,464 @@ brasper_api.enabled = lambda tenant: False
 os.environ.setdefault("BRASPER_IA_SHARED_SECRET", "test-secret")
 
 
+def case_panel_inbox_v2():
+    """Panel v2: filtros/since/after, sender bot vs asesor, notas internas,
+    respuestas rapidas, cache de adjuntos y web vitals."""
+    import time
+    client = _client()
+    # Dos conversaciones: una en cola (handoff sin asesor) y una con el bot.
+    c1 = db.get_or_create_conversation("wa:51900000001", "whatsapp")
+    db.add_message(c1, "user", "quiero enviar 300 reales")
+    db.add_message(c1, "assistant", "Perfeito, cotizacion lista")
+    db.set_conversation_status(c1, "handoff")
+    db.merge_lead_data(c1, {"nombre": "Marcia Teste", "monto_enviar": "R$ 300"})
+    time.sleep(0.01)
+    c2 = db.get_or_create_conversation("tg:777001", "telegram")
+    db.add_message(c2, "user", "hola")
+    db.add_message(c2, "assistant", "Hola, soy el asistente")
+
+    # Lista: campos nuevos y filtros.
+    r = client.get("/api/conversations", headers=OWNER)
+    assert r.status_code == 200, r.text
+    rows = {c["id"]: c for c in r.json()["conversations"]}
+    assert rows[c1]["lead_name"] == "Marcia Teste" and rows[c1]["last_role"] == "assistant", rows[c1]
+    assert rows[c1]["waiting_since"] and rows[c2]["waiting_since"] is None
+    ids = lambda resp: {c["id"] for c in resp.json()["conversations"]}  # noqa: E731
+    assert c1 in ids(client.get("/api/conversations?status=handoff", headers=OWNER))
+    assert c1 not in ids(client.get("/api/conversations?status=active", headers=OWNER))
+    assert c2 in ids(client.get("/api/conversations?channel=telegram", headers=OWNER))
+    assert c1 in ids(client.get("/api/conversations?assigned=none", headers=OWNER))
+    assert ids(client.get("/api/conversations?q=marcia", headers=OWNER)) == {c1}
+    assert ids(client.get("/api/conversations?q=51900000001", headers=OWNER)) == {c1}
+    assert client.get("/api/conversations?status=raro", headers=OWNER).status_code == 422
+    # since: solo lo actualizado despues del cursor.
+    since = rows[c1]["updated_at"]
+    r_since = client.get("/api/conversations", params={"since": since}, headers=OWNER)  # "+00:00" va codificado
+    later = ids(r_since)
+    assert c2 in later, later
+    assert all(c["updated_at"] >= since for c in r_since.json()["conversations"]), "since debe ser inclusivo y filtrar lo anterior"
+    old_ones = [c for c in r.json()["conversations"] if c["updated_at"] < since]
+    assert all(c["id"] not in later for c in old_ones), "since no debe traer conversaciones anteriores"
+    # paginacion por cursor.
+    r = client.get("/api/conversations?limit=1", headers=OWNER)
+    assert r.json()["next_before"] is not None and len(r.json()["conversations"]) == 1
+    # El agente no puede filtrar por conversaciones de otro.
+    assert client.get("/api/conversations?assigned=owner@agencia.com", headers=AGENT).status_code == 403
+
+    # sender: el bot es 'bot'; el asesor que responde es 'agent' con su email.
+    old_send = whatsapp.send_text
+
+    async def _fake_wa(*a, **k):
+        return {"sent": True}
+    whatsapp.send_text = _fake_wa
+    try:
+        before = client.get(f"/api/conversations/{c1}", headers=OWNER).json()
+        assert before["partial"] is False and before["notes"] == []
+        assert [m["sender"] for m in before["messages"]] == ["user", "bot"], before["messages"]
+        last_ts = before["messages"][-1]["created_at"]
+        time.sleep(0.01)
+        r = client.post(f"/api/conversations/{c1}/reply", headers=OWNER, json={"text": "Hola, te atiendo"})
+        assert r.status_code == 200, r.text
+        inc = client.get(f"/api/conversations/{c1}", params={"after": last_ts}, headers=OWNER).json()
+        # after es inclusivo (segundos): trae el nuevo y, como mucho, los del mismo segundo.
+        assert inc["partial"] is True and 1 <= len(inc["messages"]) <= len(before["messages"]) + 1, inc
+        assert all(m["created_at"] >= last_ts for m in inc["messages"]), inc
+        assert inc["messages"][-1]["sender"] == "agent" and inc["messages"][-1]["agent_email"] == "owner@agencia.com"
+    finally:
+        whatsapp.send_text = old_send
+
+    # Notas internas: se guardan, no generan mensaje al cliente, respetan el guard de asesor.
+    n_msgs = len(db.get_messages(c1))
+    r = client.post(f"/api/conversations/{c1}/notes", headers=OWNER, json={"text": "Cliente VIP, priorizar"})
+    assert r.status_code == 200 and r.json()["note"]["author"] == "owner@agencia.com", r.text
+    assert len(db.get_messages(c1)) == n_msgs, "la nota no debe ser un mensaje"
+    assert client.post(f"/api/conversations/{c1}/notes", headers=OWNER, json={"text": "  "}).status_code == 422
+    notes = client.get(f"/api/conversations/{c1}/notes", headers=OWNER).json()["notes"]
+    assert len(notes) == 1 and notes[0]["text"] == "Cliente VIP, priorizar"
+    # c1 quedo asignada al owner al responder: el agente no puede anotar ahi.
+    assert client.post(f"/api/conversations/{c1}/notes", headers=AGENT, json={"text": "x"}).status_code == 403
+
+    # Respuestas rapidas: predeterminadas con variables documentadas.
+    r = client.get("/api/quick-replies", headers=AGENT)
+    assert r.status_code == 200 and r.json()["quick_replies"], r.text
+    assert "nombre" in r.json()["variables"]
+    assert all("{" in q["text"] or q["text"] for q in r.json()["quick_replies"])
+
+    # Adjuntos: el proxy manda Cache-Control privado (el panel no re-descarga en cada poll).
+    old_dl = telegram.download_file
+
+    async def _fake_dl(ref):
+        return b"\x89PNGfake", "image/png"
+    telegram.download_file = _fake_dl
+    try:
+        r = client.get("/api/media?provider=telegram&ref=abc", headers=OWNER)
+        assert r.status_code == 200 and r.headers.get("cache-control") == "private, max-age=3600", r.headers
+        assert r.headers["content-type"].startswith("image/png")
+    finally:
+        telegram.download_file = old_dl
+
+    # Web vitals: cualquier usuario del panel reporta; aparecen en /api/ops/metrics.
+    assert client.post("/api/ops/web-vitals", json={"name": "LCP", "value": 1200}).status_code == 401
+    r = client.post("/api/ops/web-vitals", headers=AGENT, json={"name": "LCP", "value": 1200, "path": "/conversaciones", "rating": "good"})
+    assert r.status_code == 200, r.text
+    assert client.post("/api/ops/web-vitals", headers=AGENT, json={"name": "XYZ", "value": 1}).status_code == 422
+    snap = client.get("/api/ops/metrics", headers=OWNER).json()
+    assert snap["web_vitals"]["LCP"]["samples"] >= 1 and snap["web_vitals"]["LCP"]["p75"] == 1200.0, snap["web_vitals"]
+
+
+# ---------------------------------------------------------------------------
+# Casos 47-56: plan de atencion autonoma (conocimiento, estado, anti-bucle,
+# webhook/identidad/coex, presencia+claim, etiquetas, audios, documentos
+# publicos, contratos de herramientas, metricas por flujo)
+# ---------------------------------------------------------------------------
+from core import audio_flow, audio_review, features, handoff_summary, idempotency, knowledge, presence, public_docs, tool_contracts  # noqa: E402
+
+
+def _with_features(**flags):
+    """Context manager simple para alterar flags en la config temporal."""
+    class _Ctx:
+        def __enter__(self):
+            cfg = T.get_config()
+            self.prev = cfg.get("features")
+            cfg["features"] = {**(self.prev or {}), **flags}
+            return self
+
+        def __exit__(self, *a):
+            cfg = T.get_config()
+            if self.prev is None:
+                cfg.pop("features", None)
+            else:
+                cfg["features"] = self.prev
+    return _Ctx()
+
+
+def case_knowledge_faq_with_source():
+    out = _run(engine.handle_message("kb-1", "¿Qué documentos necesito para enviar?"))
+    assert out["usage"] is None and out["handoff"] is False, out
+    assert "DNI" in out["response"] and "Fuente" in out["response"] and "rev. 2026" in out["response"], out["response"]
+    assert out["flow"] == "info", out
+    # Portugues: variante del mismo grupo en el idioma del usuario.
+    out_pt = _run(engine.handle_message("kb-2", "quais documentos preciso para me cadastrar?"))
+    assert "CPF" in out_pt["response"] and "Fonte" in out_pt["response"], out_pt["response"]
+    # Pregunta frecuente SIN respuesta aprobada (borrador): incertidumbre explicita, sin inventar ni derivar.
+    out_miss = _run(engine.handle_message("kb-3", "¿cuánto demora en llegar el dinero a Brasil?"))
+    assert out_miss["usage"] is None and out_miss["handoff"] is False, out_miss
+    assert "no tengo esa información" in out_miss["response"].lower() and "asesor" in out_miss["response"].lower()
+    assert not any(ch.isdigit() for ch in out_miss["response"].split("Cotizar")[0]), "no inventa tiempos"
+    # Cotizar sigue teniendo prioridad sobre la FAQ ("cómo cotizo 500 soles a reales" trae monto+monedas).
+    out_q = _run(engine.handle_message("kb-4", "Cotizar 500 PEN a BRL"))
+    assert out_q["flow"] == "quote" and out_q["usage"] is None, out_q
+    # Flag apagada -> la pregunta va al LLM (stub).
+    with _with_features(knowledge=False):
+        out_off = _run(engine.handle_message("kb-5", "¿Qué documentos aceptan?"))
+    assert out_off["response"] == "[respuesta simulada]", out_off
+    client = _client()
+    r = client.get("/api/knowledge", headers=AGENT)
+    assert r.status_code == 200 and r.json()["approved"] >= 10 and r.json()["draft"] >= 1, r.text
+    assert knowledge.search("horario de atencion", "es") is None, "los borradores no se sirven"
+
+
+def case_status_intent_handoff_with_summary():
+    auth_mod.ensure_seed()
+    out = _run(engine.handle_message("st-1", "hola, ¿ya llegó mi envío de ayer?"))
+    assert out["handoff"] is True and out["usage"] is None and out["flow"] == "status", out
+    low = out["response"].lower()
+    assert "asesor" in low and "acreditado" not in low and "confirmado" not in low, out["response"]
+    conv = db.get_conversation(out["conversation_id"])
+    assert conv["status"] == "handoff" and conv.get("assigned_to"), conv
+    h = conv["lead_data"].get("handoff")
+    assert h and h["reason"] == "status_lookup_unavailable" and "Pendiente" in h["text"], h
+    # El contrato documenta la ausencia de API de estado.
+    tools = {t["name"]: t for t in tool_contracts.describe()}
+    assert tools["status.lookup"]["available"] is False
+    out_pt = _run(engine.handle_message("st-2", "meu envio já chegou?"))
+    # Frase corta: la deteccion de idioma puede caer en es; lo relevante es la derivacion honesta.
+    assert out_pt["handoff"] is True and ("assessor" in out_pt["response"].lower() or "asesor" in out_pt["response"].lower()), out_pt
+
+
+def case_anti_loop_limits_repetition():
+    auth_mod.ensure_seed()
+    old = llm.chat
+
+    async def _same(tenant, messages):
+        return {"content": "Claro, cuéntame más sobre tu consulta.", "provider": "stub", "model": "stub-model",
+                "tokens_in": 10, "tokens_out": 5, "cost_usd": 0.0}
+
+    llm.chat = _same
+    try:
+        o1 = _run(engine.handle_message("loop-1", "hola, tengo una duda general"))
+        cid = o1["conversation_id"]
+        assert o1["response"].startswith("Claro"), o1
+        o2 = _run(engine.handle_message("loop-1", "no entiendo", conversation_id=cid))
+        assert "repitiendo" in o2["response"].lower() and o2["handoff"] is False, o2
+        # El mensaje de "repitiendo" rompe la racha; una tercera repeticion identica vuelve a contar.
+        o3 = _run(engine.handle_message("loop-1", "sigo sin entender", conversation_id=cid))
+        assert o3["response"].startswith("Claro"), o3  # primera vez tras el aviso
+        o4 = _run(engine.handle_message("loop-1", "???", conversation_id=cid))
+        assert "repitiendo" in o4["response"].lower(), o4
+        o5 = _run(engine.handle_message("loop-1", "otra vez", conversation_id=cid))
+        assert o5["response"].startswith("Claro"), o5
+        # Con la flag apagada no interviene.
+        with _with_features(anti_loop=False):
+            o6 = _run(engine.handle_message("loop-2", "tengo una consulta general"))
+            o7 = _run(engine.handle_message("loop-2", "sigue siendo general", conversation_id=o6["conversation_id"]))
+        assert o7["response"].startswith("Claro"), o7
+    finally:
+        llm.chat = old
+
+
+def _wa_payload(msg_id, text, pnid="PNID_BRASPER_123", frm="51911111111", name="Marcia Teste", extra=None):
+    contact = {"profile": {"name": name}, "wa_id": frm}
+    if extra:
+        contact.update(extra)
+    return {"object": "whatsapp_business_account", "entry": [{"changes": [{"field": "messages", "value": {
+        "metadata": {"phone_number_id": pnid}, "contacts": [contact],
+        "messages": [{"from": frm, "id": msg_id, "timestamp": "1", "type": "text", "text": {"body": text}}]}}]}]}
+
+
+def case_webhook_dedup_identity_coex():
+    sent: list = []
+
+    async def _fake_send(to, text, connection=None, **kw):
+        sent.append((to, text, (connection or {}).get("id")))
+        return {"sent": True}
+
+    old_send = whatsapp.send_text
+    whatsapp.send_text = _fake_send
+    os.environ["WA_PHONE_NUMBER_ID_BRASPER"] = "PNID_BRASPER_123"
+    client = _client()
+    try:
+        body = _wa_payload("wamid.ONE", "Cotizar 100 PEN a BRL", extra={"user_id": "bsuid-abc"})
+        r = client.post("/webhook", json=body)
+        assert r.status_code == 200, r.text
+        res = r.json()["results"][0]
+        assert res["resolved"] and res["sent"] and res.get("flow") == "quote", res
+        assert sent and sent[-1][2] == "default", "la respuesta sale por la conexion de origen"
+        # Identidad conservada sin asumir semantica de campos extra.
+        conv = [c for c in db.list_conversations() if c["user_ref"] == "wa:51911111111"][0]
+        lead = db.get_conversation(conv["id"])["lead_data"]  # en la lista viene como JSON string
+        assert lead.get("wa_profile_name") == "Marcia Teste" and lead.get("wa_identity") == {"user_id": "bsuid-abc"}, lead
+        assert conv.get("connection_id") == "default", conv
+        assert conv.get("lead_name") == "Marcia Teste" or lead.get("nombre") is None  # el nombre de perfil no es identidad verificada
+        n_before = len(sent)
+        # Webhook repetido (mismo id): no responde dos veces.
+        r2 = client.post("/webhook", json=body)
+        assert r2.json()["results"][0].get("duplicate") is True, r2.text
+        assert len(sent) == n_before, "duplicado no debe reenviar"
+        # Estados de entrega e historial Coex: nunca disparan respuestas.
+        st = {"entry": [{"changes": [{"field": "messages", "value": {"metadata": {"phone_number_id": "PNID_BRASPER_123"},
+              "statuses": [{"id": "wamid.ONE", "status": "delivered", "recipient_id": "51911111111"}]}}]}]}
+        assert client.post("/webhook", json=st).json()["results"][0]["status"] == "delivered"
+        hist = {"entry": [{"changes": [{"field": "history", "value": {"metadata": {"phone_number_id": "PNID_BRASPER_123"}, "history": []}}]}]}
+        assert client.post("/webhook", json=hist).json()["results"][0]["ignored"] is True
+        assert len(sent) == n_before
+        # Eco desde la app del celular: ignorado sin coex; con coex -> actividad humana + takeover.
+        echo = {"entry": [{"changes": [{"field": "smb_message_echoes", "value": {"metadata": {"phone_number_id": "PNID_BRASPER_123"},
+                "message_echoes": [{"id": "wamid.ECHO1", "to": "51911111111", "type": "text", "text": {"body": "Hola, soy Nadia desde el celular"}}]}}]}]}
+        assert client.post("/webhook", json=echo).json()["results"][0].get("ignored") is True
+        cfg = T.get_config()
+        prev_wa, prev_f = dict(cfg["whatsapp"]), cfg.get("features")
+        cfg["whatsapp"] = {**cfg["whatsapp"], "mode": "coex"}
+        cfg["features"] = {**(prev_f or {}), "coex": True}
+        try:
+            echo["entry"][0]["changes"][0]["value"]["message_echoes"][0]["id"] = "wamid.ECHO2"
+            res = client.post("/webhook", json=echo).json()["results"][0]
+            assert res.get("takeover") is True, res
+            conv = db.get_conversation(res["conversation_id"])
+            assert conv["status"] == "handoff", conv
+            msgs = db.get_messages(res["conversation_id"])
+            assert msgs[-1]["sender"] == "agent" and msgs[-1]["agent_email"] == "whatsapp-app", msgs[-1]
+            # El bot no responde por encima del humano del celular.
+            r3 = client.post("/webhook", json=_wa_payload("wamid.TWO", "gracias!"))
+            assert r3.json()["results"][0].get("paused") is True, r3.text
+            assert len(sent) == n_before, "bot en pausa: no envia"
+        finally:
+            cfg["whatsapp"] = prev_wa
+            if prev_f is None:
+                cfg.pop("features", None)
+            else:
+                cfg["features"] = prev_f
+        # Registro de conexiones sin secretos.
+        r = client.get("/api/whatsapp/connections", headers=OWNER)
+        assert r.status_code == 200 and r.json()["connections"][0]["id"] == "default", r.text
+        assert "token" not in r.json()["connections"][0]
+    finally:
+        whatsapp.send_text = old_send
+        os.environ.pop("WA_PHONE_NUMBER_ID_BRASPER", None)
+
+
+def case_presence_and_atomic_claim():
+    auth_mod.ensure_seed()
+    client = _client()
+    assert client.post("/api/presence", json={"status": "available"}).status_code == 401
+    assert client.post("/api/presence", headers=AGENT, json={"status": "raro"}).status_code == 422
+    r = client.post("/api/presence", headers=AGENT, json={"status": "away"})
+    assert r.status_code == 200 and r.json()["status"] == "away", r.text
+    adv = client.get("/api/advisors", headers=OWNER).json()
+    assert adv["advisors"][0]["presence"]["status"] == "away", adv
+    # Con presencia obligatoria y el unico asesor ausente -> cola (sin asignar) y aviso al cliente.
+    with _with_features(presence_required=True):
+        out = _run(engine.handle_message("pres-1", "quiero un asesor"))
+        conv = db.get_conversation(out["conversation_id"])
+        assert conv["status"] == "handoff" and not conv.get("assigned_to"), conv
+        assert "cola" in out["response"].lower(), out["response"]
+        assert conv["lead_data"]["handoff"]["reason"] == "no_advisor_available"
+        # Asesor disponible -> se asigna.
+        client.post("/api/presence", headers=AGENT, json={"status": "available"})
+        out2 = _run(engine.handle_message("pres-2", "quiero un asesor"))
+        assert db.get_conversation(out2["conversation_id"])["assigned_to"] == "agent@brasper.com"
+    # Claim atomico: la conversacion ya es del agente; el owner no la toma por encima (409).
+    cid = out2["conversation_id"]
+    assert db.claim_conversation(cid, "agent@brasper.com") is True
+    assert db.claim_conversation(cid, "owner@agencia.com") is False
+    r = client.post(f"/api/conversations/{cid}/status", headers=OWNER, json={"status": "handoff"})
+    assert r.status_code == 409, r.text
+    # Libre -> la toma quien llegue primero; el segundo recibe 409.
+    free = db.get_or_create_conversation("pres-3", "webchat")
+    db.add_message(free, "user", "hola")
+    r1 = client.post(f"/api/conversations/{free}/status", headers=AGENT, json={"status": "handoff"})
+    r2 = client.post(f"/api/conversations/{free}/status", headers=OWNER, json={"status": "handoff"})
+    assert r1.status_code == 200 and r2.status_code == 409, (r1.text, r2.text)
+    assert db.get_conversation(free)["lead_data"]["handoff"]["reason"] == "manual"
+
+
+def case_tags_filter():
+    client = _client()
+    cid = db.get_or_create_conversation("tag-1", "webchat")
+    db.add_message(cid, "user", "hola")
+    assert client.post(f"/api/conversations/{cid}/tags", headers=OWNER, json={"tag": "  "}).status_code == 422
+    r = client.post(f"/api/conversations/{cid}/tags", headers=OWNER, json={"tag": " Monto Alto "})
+    assert r.status_code == 200 and r.json()["tags"] == ["monto alto"], r.text
+    client.post(f"/api/conversations/{cid}/tags", headers=OWNER, json={"tag": "reclamo"})
+    r = client.get("/api/conversations", params={"tag": "reclamo"}, headers=OWNER)
+    ids = {c["id"] for c in r.json()["conversations"]}
+    assert ids == {cid}, ids
+    assert r.json()["conversations"][0]["tags"] == ["monto alto", "reclamo"]
+    r = client.delete(f"/api/conversations/{cid}/tags/reclamo", headers=OWNER)
+    assert r.json()["tags"] == ["monto alto"]
+    assert any(t["tag"] == "monto alto" for t in client.get("/api/tags", headers=AGENT).json()["tags"])
+    assert client.get(f"/api/conversations/{cid}", headers=OWNER).json()["tags"] == ["monto alto"]
+
+
+def case_audio_review_and_flow():
+    auth_mod.ensure_seed()
+    r = audio_review.review_transcript("quiero enviar 500 o 600 soles a Brasil")
+    assert r["ambiguous"] and r["reason"] == "multiple_amounts" and r["amounts"] == [500.0, 600.0], r
+    assert audio_review.review_transcript("Cotizar 500 PEN a BRL")["ambiguous"] is False
+    assert audio_review.review_transcript("quiero mandar 500")["reason"] == "amount_without_currency"
+    assert audio_review.review_transcript("son 300 mil reales")["reason"] == "thousands_word"
+    assert audio_review.review_transcript("hola [inaudible] gracias")["reason"] == "unreadable_parts"
+    sent: list = []
+
+    async def _send(text):
+        sent.append(text)
+        return {"ok": True}
+
+    media = {"provider": "telegram", "kind": "voice", "ref": "VOICE-AMB", "mime": "audio/ogg"}
+    out = _run(audio_flow.process_transcript(channel="telegram", user_ref="tg:9001", text="quiero enviar 500 o 600 soles",
+                                             media=media, send=_send))
+    assert out.get("ambiguous") is True and sent and "Escuché" in sent[-1] and "500" in sent[-1], (out, sent)
+    cid = out["conversation_id"]
+    msgs = db.get_messages(cid)
+    assert msgs[-2]["role"] == "user" and msgs[-2]["media"]["ref"] == "VOICE-AMB", msgs[-2]
+    assert db.get_lead_data(cid).get("audio_pending_confirmation") == "multiple_amounts"
+    assert db.conversation_status(cid) != "handoff", "un audio ambiguo NO deriva: pide confirmacion"
+    # Audio legible -> sigue con la IA (cotizador) y limpia la confirmacion pendiente.
+    out2 = _run(audio_flow.process_transcript(channel="telegram", user_ref="tg:9001", text="Cotizar 500 PEN a BRL",
+                                              media=media, send=_send, conversation_id=cid))
+    assert out2.get("flow") == "quote" and "710" in sent[-1].replace(",", ""), (out2, sent[-1])
+    assert not db.get_lead_data(cid).get("audio_pending_confirmation")
+    # Audio imposible de transcribir: evidencia + asesor (no se pierde).
+    out3 = _run(audio_flow.unreadable(channel="telegram", user_ref="tg:9002", media=media, send=_send, error="whisper caido"))
+    c3 = db.get_conversation(out3["conversation_id"])
+    assert c3["status"] == "handoff" and c3["lead_data"]["handoff"]["reason"] == "audio_unreadable", c3
+    assert db.get_messages(c3["id"])[0]["media"]["ref"] == "VOICE-AMB"
+    # Comprobante recibido != pago confirmado (texto del ack del webhook WhatsApp).
+    from api import routes as _routes
+    assert "verificado" in _routes._PROOF_ACK and "confirma" in _routes._PROOF_ACK
+
+
+def case_public_documents_and_deletion():
+    client = _client()
+    assert client.get("/api/public/documents/privacidad").status_code == 404, "sin publicar -> 404"
+    assert client.get("/api/public/documents/otro").status_code == 404
+    assert client.put("/api/admin/documents/privacidad", headers=AGENT,
+                      json={"lang": "es", "title": "x", "body_md": "y"}).status_code == 403
+    r = client.put("/api/admin/documents/privacidad", headers=OWNER,
+                   json={"lang": "es", "title": "Política de privacidad", "body_md": "# Hola\n<script>alert(1)</script>Texto **ok**"})
+    assert r.status_code == 200 and r.json()["document"]["status"] == "draft", r.text
+    v = r.json()["document"]["version"]
+    assert "<script>" not in r.json()["document"]["body_md"], "sin HTML ejecutable"
+    assert client.get("/api/public/documents/privacidad").status_code == 404, "el borrador NO es publico"
+    r = client.post("/api/admin/documents/privacidad/publish", headers=OWNER, json={"lang": "es", "version": v})
+    assert r.status_code == 200 and r.json()["document"]["status"] == "published", r.text
+    pub = client.get("/api/public/documents/privacidad").json()
+    assert pub["version"] == v and "Texto **ok**" in pub["body_md"] and "body_md" in pub
+    assert client.get("/api/public/documents/privacidad?lang=pt").status_code == 404
+    ov = client.get("/api/admin/documents", headers=OWNER).json()["documents"]
+    row = [d for d in ov if d["slug"] == "privacidad" and d["lang"] == "es"][0]
+    assert row["published_version"] == v and row["draft_version"] is None, row
+    hist = client.get("/api/admin/documents/privacidad?lang=es", headers=OWNER).json()["history"]
+    assert hist and hist[0]["status"] == "published"
+    # Solicitud publica de eliminacion: se registra, no borra nada.
+    n_conv = len(db.list_conversations())
+    r = client.post("/api/public/data-deletion-request", json={"contact": "+51 999 888 777", "channel": "whatsapp", "detail": "borren mis datos"})
+    assert r.status_code == 200 and r.json()["status"] == "received", r.text
+    assert len(db.list_conversations()) == n_conv
+    assert client.post("/api/public/data-deletion-request", json={"contact": "x"}).status_code == 422
+    reqs = client.get("/api/admin/deletion-requests", headers=OWNER).json()["requests"]
+    assert reqs and reqs[0]["contact"] == "+51 999 888 777"
+    assert client.get("/api/admin/deletion-requests", headers=AGENT).status_code == 403
+    r = client.post(f"/api/admin/deletion-requests/{reqs[0]['id']}/status", headers=OWNER,
+                    json={"status": "verifying", "note": "pedir documento"})
+    assert r.status_code == 200 and r.json()["request"]["status"] == "verifying"
+
+
+def case_tool_contracts_idempotency():
+    import time as _t
+    assert tool_contracts.validate("quote.compute", {"origin": "PEN", "destination": "BRL", "amount_send": 500}) is None
+    assert "faltan" in tool_contracts.validate("quote.compute", {"origin": "PEN"})
+    assert "no permitidas" in tool_contracts.validate("quote.compute", {"origin": "PEN", "destination": "BRL", "x": 1})
+    assert "tipo" in tool_contracts.validate("quote.compute", {"origin": "PEN", "destination": "BRL", "amount_send": True}) or "debe ser" in tool_contracts.validate("quote.compute", {"origin": "PEN", "destination": "BRL", "amount_send": True})
+    assert tool_contracts.run("status.lookup", {}, lambda: 1)["error_code"] == "unavailable"
+    assert tool_contracts.run("quote.compute", {"origin": "PEN"}, lambda **k: 1)["error_code"] == "validation"
+    slow = tool_contracts.run("knowledge.search", {"query": "x"}, lambda query, lang="es": _t.sleep(2.6) or None)
+    assert slow["error_code"] == "timeout", slow
+    boom = tool_contracts.run("knowledge.search", {"query": "x"}, lambda query, lang="es": 1 / 0)
+    assert boom["error_code"] == "internal", boom
+    calls = []
+
+    def _upsert(lead):
+        calls.append(lead)
+        return {"ok": True, "data": {"id": 77, "created": True}}
+
+    key = idempotency.make_key("client.upsert", "+51", "999000111", "dni", "12345678")
+    r1 = tool_contracts.run("client.upsert", {"lead": {"telefono": "999000111"}}, _upsert, idempotency_key=key)
+    r2 = tool_contracts.run("client.upsert", {"lead": {"telefono": "999000111"}}, _upsert, idempotency_key=key)
+    assert r1["ok"] and r2["ok"] and r2.get("replayed") is True and len(calls) == 1, (r1, r2, calls)
+    bad = tool_contracts.run("client.upsert", {"lead": {}}, lambda lead: {"ok": False, "error": "falta telefono"},
+                             idempotency_key=idempotency.make_key("client.upsert", "nada"))
+    assert bad["error_code"] == "upstream" and idempotency.recall(idempotency.make_key("client.upsert", "nada")) is None
+    assert idempotency.seen_event("test", "e1") is False and idempotency.seen_event("test", "e1") is True
+    assert idempotency.seen_event("test", None) is False
+    client = _client()
+    r = client.get("/api/tools", headers=OWNER)
+    assert r.status_code == 200 and any(t["name"] == "client.upsert" and t["write"] for t in r.json()["tools"]), r.text
+    assert r.json()["features"]["knowledge"] is True
+
+
+def case_flow_metrics_and_summary():
+    _run(engine.handle_message("flow-1", "Cotizar 200 PEN a BRL"))
+    snap = _client().get("/api/ops/metrics", headers=OWNER).json()
+    assert snap["flows"].get("quote", {}).get("count", 0) >= 1, snap["flows"]
+    assert snap["flows"]["quote"]["p95_ms"] is not None
+    # Resumen de derivacion completo para el asesor.
+    out = _run(engine.handle_message("flow-2", "quiero hablar con un asesor"))
+    h = db.get_lead_data(out["conversation_id"])["handoff"]
+    assert h["reason_label"] and "Motivo" in h["text"] and "Últimos mensajes" in h["text"], h
+    assert handoff_summary.REASON_LABELS["media"]
+
+
 def main() -> int:
     check("1. config single-tenant Brasper (secretos por env, prompt con reglas)", case_config_single_tenant)
     check("2. persistencia + orden cronologico", case_persistence_order)
@@ -1400,6 +1860,17 @@ def main() -> int:
     check("43. Borrado de conversacion con guard de identidad", case_conversation_delete_guard)
     check("44. E2E HTTP: prompt configurado desde Admin API llega al LLM", case_bot_config_e2e)
     check("45. Webchat compat (/consulta-webchat) publico y con seguimiento", case_webchat_compat_endpoint)
+    check("46. Panel v2: filtros/since/after, sender, notas, quick replies, cache media, vitals", case_panel_inbox_v2)
+    check("47. Conocimiento: FAQ aprobada con fuente; sin respuesta -> incertidumbre explicita", case_knowledge_faq_with_source)
+    check("48. Estado de envio sin API -> asesor con resumen (nunca inventa)", case_status_intent_handoff_with_summary)
+    check("49. Anti-bucle: limite de repeticiones del bot", case_anti_loop_limits_repetition)
+    check("50. Webhook WA: dedup, identidad, estados/historial, ecos Coex, conexion de origen", case_webhook_dedup_identity_coex)
+    check("51. Presencia con heartbeat + cola + claim atomico (409)", case_presence_and_atomic_claim)
+    check("52. Etiquetas: alta/baja/filtro", case_tags_filter)
+    check("53. Audios: cifras ambiguas piden confirmacion; evidencia; no transcribible -> asesor", case_audio_review_and_flow)
+    check("54. Documentos publicos: borrador privado, publicacion versionada, solicitud de borrado", case_public_documents_and_deletion)
+    check("55. Contratos de herramientas: validacion, timeout, no disponible, idempotencia", case_tool_contracts_idempotency)
+    check("56. Metricas por flujo + resumen de derivacion", case_flow_metrics_and_summary)
 
     print("=" * 60)
     print("GATE PRODUCCION — verificacion (sin pytest, sin LLM real)")

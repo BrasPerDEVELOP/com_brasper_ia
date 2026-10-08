@@ -4,7 +4,7 @@
 > Este plan prioriza el **producto Brasper fintech** que se está lanzando.  
 > Skills: `brasper-ia-audit`, `brasper-fintech-ia` · Ver `AGENTS.md`.
 
-> Plan detallado por sprints: [PLAN-MEJORAS-2026-10.md](./PLAN-MEJORAS-2026-10.md)
+> Plan detallado por sprints: [PLAN-MEJORAS-2026-10.md](./PLAN-MEJORAS-2026-10.md) · Plan UX/UI del panel: [PLAN-PANEL-UX-2026-10.md](./PLAN-PANEL-UX-2026-10.md) · Atención autónoma: [PLAN-ATENCION-AUTONOMA-2026-10.md](./PLAN-ATENCION-AUTONOMA-2026-10.md) (ejecutado en código; diagnóstico en [ATENCION-AUTONOMA-ETAPA-0.md](./ATENCION-AUTONOMA-ETAPA-0.md))
 
 ## Estado por fase
 

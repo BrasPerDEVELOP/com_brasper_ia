@@ -8,7 +8,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import backup
-from core import alerts, auth, audio_adapter, db, debounce, engine, jobs, tenants, telegram, whatsapp
+from core import alerts, audio_adapter, audio_flow, auth, db, debounce, engine, jobs, tenants, telegram, whatsapp
 
 
 def init() -> None:
@@ -40,7 +40,7 @@ def handle(job: dict) -> None:
         )
         return
     if job_type == "whatsapp.audio":
-        asyncio.run(transcribe_audio_job(payload))
+        asyncio.run(transcribe_audio_job({**payload, "_attempt": int(job.get("attempts") or 0)}))
         return
     if job_type == "channel.message":
         asyncio.run(handle_channel_message(payload))
@@ -54,11 +54,24 @@ async def transcribe_audio_job(payload: dict) -> None:
     if not tenant:
         print(f"[worker] tenant inactivo/no encontrado: {payload.get('tenant_id')}")
         return
+    conn = tenants.whatsapp_connection_by_id(payload.get("connection_id"), tenant)
+    media = {"provider": "whatsapp", "kind": "audio", "ref": payload["media_id"],
+             "mime": payload.get("mime_type")}
+
+    async def _send(text: str) -> dict:
+        return await whatsapp.send_text(payload["to"], text, connection=conn)
+
     tr = await audio_adapter.transcribe_whatsapp(tenant, payload["media_id"])
     if not tr.get("ok") or not (tr.get("text") or "").strip():
+        if int(payload.get("_attempt") or 0) >= 2:
+            # Último intento: conservar la evidencia y derivar en vez de perder el audio.
+            await audio_flow.unreadable(channel="whatsapp", user_ref=payload["user_ref"], media=media,
+                                        send=_send, error=tr.get("error"))
+            return
         raise RuntimeError(f"transcripción de audio falló: {tr.get('error')}")
-    # Reutiliza el pipeline de mensajes con el texto transcrito.
-    await handle_channel_message({**payload, "text": tr["text"].strip()})
+    # Flujo compartido: evidencia + confirmación de cifras ambiguas + grafo.
+    await audio_flow.process_transcript(channel="whatsapp", user_ref=payload["user_ref"],
+                                        text=tr["text"].strip(), media=media, send=_send)
 
 
 async def handle_channel_message(payload: dict) -> None:
@@ -78,7 +91,10 @@ async def handle_channel_message(payload: dict) -> None:
     if out.get("paused") or not (out.get("response") or "").strip():
         return
     if channel == "whatsapp":
-        await whatsapp.send_text(payload["to"], out["response"])
+        # La respuesta sale por la conexión (número) que recibió el mensaje.
+        conn_id = payload.get("connection_id") or (db.get_conversation(out["conversation_id"]) or {}).get("connection_id")
+        await whatsapp.send_text(payload["to"], out["response"],
+                                 connection=tenants.whatsapp_connection_by_id(conn_id, tenant))
         return
     if channel == "telegram":
         markup = telegram.build_handoff_markup() if out.get("handoff") else None

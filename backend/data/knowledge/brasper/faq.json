@@ -1,0 +1,118 @@
+{
+  "version": "2026-10-07",
+  "notes": "Base de conocimiento del bot Brasper. Solo las entradas con status='approved' se usan para responder. Cada entrada cita su fuente (código/configuración del repo o documento aprobado) y su fecha de revisión. Las entradas 'draft' son preguntas frecuentes detectadas que requieren respuesta aprobada por el equipo comercial antes de activarse: el bot NO las responde (dice que no tiene esa información confirmada).",
+  "entries": [
+    {
+      "id": "que-es-brasper", "group": "que-es", "lang": "es", "status": "approved",
+      "question": "¿Qué es Brasper y cómo funciona el envío?",
+      "keywords": ["que es brasper", "qué es brasper", "como funciona", "cómo funciona", "que hacen", "qué hacen", "servicio", "brasper"],
+      "answer": "Brasper Transferencias realiza envíos de dinero entre Perú y Brasil (soles ↔ reales; también dólares ↔ reales). El flujo es: 1) cotizas aquí mismo, 2) te identificas con tu documento, 3) depositas en una cuenta oficial de Brasper, 4) envías el comprobante y un asesor valida el pago antes de registrar la operación.",
+      "source": "config/tenants.json → quote.pairs; core/lead_onboarding.py (flujo de identificación y cuentas)", "reviewed_at": "2026-10-07"
+    },
+    {
+      "id": "que-es-brasper-pt", "group": "que-es", "lang": "pt", "status": "approved",
+      "question": "O que é a Brasper e como funciona o envio?",
+      "keywords": ["o que e brasper", "o que é brasper", "como funciona", "o que voces fazem", "o que vocês fazem", "servico", "serviço", "brasper"],
+      "answer": "A Brasper Transferências realiza envios de dinheiro entre Peru e Brasil (soles ↔ reais; também dólares ↔ reais). O fluxo é: 1) você cota aqui mesmo, 2) se identifica com seu documento, 3) deposita em uma conta oficial da Brasper, 4) envia o comprovante e um assessor valida o pagamento antes de registrar a operação.",
+      "source": "config/tenants.json → quote.pairs; core/lead_onboarding.py", "reviewed_at": "2026-10-07"
+    },
+    {
+      "id": "como-cotizar", "group": "cotizar", "lang": "es", "status": "approved",
+      "question": "¿Cómo pido una cotización y cuánto tiempo vale?",
+      "keywords": ["como cotizo", "cómo cotizo", "como cotizar", "cómo cotizar", "pedir cotizacion", "pedir cotización", "vigencia", "validez", "cuanto vale la cotizacion", "cuánto vale la cotización", "cuanto dura la tasa", "cuánto dura la tasa"],
+      "answer": "Escribe por ejemplo *Cotizar 500 PEN a BRL* (o el monto que desees recibir). La tasa, la comisión y los cupones se consultan en vivo en el sistema de Brasper en el momento de cotizar; la cotización tiene una vigencia de 20 minutos y después conviene volver a cotizar.",
+      "source": "core/quotes.py; config/tenants.json → quote.tc_validity_minutes = 20", "reviewed_at": "2026-10-07"
+    },
+    {
+      "id": "como-cotizar-pt", "group": "cotizar", "lang": "pt", "status": "approved",
+      "question": "Como peço uma cotação e por quanto tempo ela vale?",
+      "keywords": ["como cotar", "como faco uma cotacao", "como faço uma cotação", "pedir cotacao", "pedir cotação", "validade", "quanto tempo vale", "quanto dura a taxa"],
+      "answer": "Escreva por exemplo *Cotizar 500 BRL a PEN* (ou o valor que deseja receber). A taxa, a comissão e os cupons são consultados ao vivo no sistema da Brasper na hora de cotar; a cotação vale 20 minutos e depois é melhor cotar de novo.",
+      "source": "core/quotes.py; config/tenants.json → quote.tc_validity_minutes = 20", "reviewed_at": "2026-10-07"
+    },
+    {
+      "id": "documentos", "group": "documentos", "lang": "es", "status": "approved",
+      "question": "¿Qué documentos aceptan para identificarme?",
+      "keywords": ["documentos", "documento", "requisitos", "que necesito", "qué necesito", "dni", "pasaporte", "carnet de extranjeria", "carnet de extranjería", "cpf", "ruc", "identificarme", "registrarme"],
+      "answer": "Para identificarte aceptamos DNI, Carné de Extranjería (CE), CPF, CNPJ, RUC o pasaporte. Te pediremos nombre completo, tipo y número de documento y un teléfono con código de país; el correo es opcional.",
+      "source": "core/lead_onboarding.py → _next_prompt (document_type, phone, email); core/brasper_api.py → _DOC_TYPES", "reviewed_at": "2026-10-07"
+    },
+    {
+      "id": "documentos-pt", "group": "documentos", "lang": "pt", "status": "approved",
+      "question": "Quais documentos vocês aceitam para me identificar?",
+      "keywords": ["documentos", "documento", "requisitos", "o que preciso", "cpf", "cnpj", "passaporte", "rg", "me identificar", "me cadastrar"],
+      "answer": "Para identificação aceitamos DNI, Carnê de Estrangeiro (CE), CPF, CNPJ, RUC ou passaporte. Vamos pedir nome completo, tipo e número do documento e um telefone com código do país; o e-mail é opcional.",
+      "source": "core/lead_onboarding.py → _next_prompt; core/brasper_api.py → _DOC_TYPES", "reviewed_at": "2026-10-07"
+    },
+    {
+      "id": "como-pago", "group": "pago", "lang": "es", "status": "approved",
+      "question": "¿Cómo y dónde pago mi envío?",
+      "keywords": ["como pago", "cómo pago", "donde pago", "dónde pago", "metodos de pago", "métodos de pago", "forma de pago", "yape", "pix", "transferencia", "deposito", "depósito", "cuenta bancaria", "cuentas"],
+      "answer": "El pago se hace por depósito o transferencia a las cuentas oficiales de Brasper (según la moneda: Yape, Pix o transferencia bancaria). Las cuentas exactas te las mostramos en este chat después de cotizar e identificarte; nunca pagues a cuentas que no aparezcan aquí.",
+      "source": "core/brasper_api.py → deposit_accounts (API Brasper); config/tenants.json → audio.context (Yape, Pix, transferencia)", "reviewed_at": "2026-10-07"
+    },
+    {
+      "id": "como-pago-pt", "group": "pago", "lang": "pt", "status": "approved",
+      "question": "Como e onde pago meu envio?",
+      "keywords": ["como pago", "como faco o pagamento", "como faço o pagamento", "onde pago", "formas de pagamento", "pix", "transferencia", "transferência", "deposito", "depósito", "conta bancaria", "contas"],
+      "answer": "O pagamento é feito por depósito ou transferência para as contas oficiais da Brasper (conforme a moeda: Pix, Yape ou transferência bancária). As contas exatas aparecem neste chat depois de cotar e se identificar; nunca pague em contas que não apareçam aqui.",
+      "source": "core/brasper_api.py → deposit_accounts; config/tenants.json → audio.context", "reviewed_at": "2026-10-07"
+    },
+    {
+      "id": "comprobante", "group": "comprobante", "lang": "es", "status": "approved",
+      "question": "Ya pagué, ¿qué hago con el comprobante?",
+      "keywords": ["comprobante", "voucher", "ya pague", "ya pagué", "ya deposite", "ya deposité", "ya transferi", "ya transferí", "captura", "constancia"],
+      "answer": "Envía el comprobante por este mismo chat (imagen o PDF). Un asesor lo verifica en el sistema de Brasper: la operación queda confirmada solo cuando el pago está validado, no al recibir el comprobante. Te avisaremos aquí.",
+      "source": "api/routes.py → _handle_whatsapp_media; core/telegram.py → _handle_incoming_media", "reviewed_at": "2026-10-07"
+    },
+    {
+      "id": "comprobante-pt", "group": "comprobante", "lang": "pt", "status": "approved",
+      "question": "Já paguei, o que faço com o comprovante?",
+      "keywords": ["comprovante", "ja paguei", "já paguei", "ja depositei", "já depositei", "ja transferi", "já transferi", "print", "captura"],
+      "answer": "Envie o comprovante por este mesmo chat (imagem ou PDF). Um assessor confere no sistema da Brasper: a operação só fica confirmada quando o pagamento é validado, não ao receber o comprovante. Avisaremos você aqui.",
+      "source": "api/routes.py → _handle_whatsapp_media; core/telegram.py → _handle_incoming_media", "reviewed_at": "2026-10-07"
+    },
+    {
+      "id": "asesor", "group": "asesor", "lang": "es", "status": "approved",
+      "question": "¿Cómo hablo con una persona?",
+      "keywords": ["hablar con alguien", "una persona", "humano", "atencion humana", "atención humana", "contactar", "telefono de atencion", "teléfono de atención"],
+      "answer": "Escribe *asesor* y una persona del equipo Brasper continúa contigo en este mismo chat. Mientras tanto puedo ayudarte a cotizar y a identificarte para agilizar tu envío.",
+      "source": "config/tenants.json → handoff.keywords; core/agent_graph.py → handoff", "reviewed_at": "2026-10-07"
+    },
+    {
+      "id": "asesor-pt", "group": "asesor", "lang": "pt", "status": "approved",
+      "question": "Como falo com uma pessoa?",
+      "keywords": ["falar com alguem", "falar com alguém", "uma pessoa", "humano", "atendimento humano", "atendente", "contato"],
+      "answer": "Escreva *atendente* e uma pessoa da equipe Brasper continua com você neste mesmo chat. Enquanto isso posso ajudar a cotar e a se identificar para agilizar seu envio.",
+      "source": "config/tenants.json → handoff.keywords; core/agent_graph.py → handoff", "reviewed_at": "2026-10-07"
+    },
+    {
+      "id": "idiomas", "group": "idiomas", "lang": "es", "status": "approved",
+      "question": "¿En qué idiomas atienden?",
+      "keywords": ["idioma", "idiomas", "portugues", "portugués", "ingles", "inglés", "hablan portugues", "falam espanhol", "english"],
+      "answer": "Atendemos en español, portugués e inglés por este chat; responde en el idioma que prefieras.",
+      "source": "config/tenants.json → languages", "reviewed_at": "2026-10-07"
+    },
+    {
+      "id": "horarios", "group": "horarios", "lang": "es", "status": "draft",
+      "question": "¿Cuál es el horario de atención y de acreditación de envíos?",
+      "keywords": ["horario", "horarios", "a que hora", "a qué hora", "atienden los domingos", "feriados", "fines de semana"],
+      "answer": "PENDIENTE DE APROBACIÓN DEL EQUIPO COMERCIAL: horario de atención humana y ventanas de acreditación por moneda.",
+      "source": "pendiente", "reviewed_at": null
+    },
+    {
+      "id": "tiempos", "group": "tiempos", "lang": "es", "status": "draft",
+      "question": "¿Cuánto demora en llegar el dinero?",
+      "keywords": ["cuanto demora", "cuánto demora", "cuanto tarda", "cuánto tarda", "en cuanto llega", "en cuánto llega", "tiempo de llegada", "quanto tempo", "quanto demora"],
+      "answer": "PENDIENTE DE APROBACIÓN DEL EQUIPO COMERCIAL: tiempos de acreditación por corredor y método.",
+      "source": "pendiente", "reviewed_at": null
+    },
+    {
+      "id": "limites", "group": "limites", "lang": "es", "status": "draft",
+      "question": "¿Cuál es el monto mínimo y máximo por envío?",
+      "keywords": ["limite", "límite", "minimo", "mínimo", "maximo", "máximo", "monto maximo", "monto máximo", "tope"],
+      "answer": "PENDIENTE DE APROBACIÓN DEL EQUIPO COMERCIAL: mínimos, máximos y documentación adicional por tramo (hoy los montos altos se derivan a un asesor según quote.high_amount_threshold).",
+      "source": "pendiente", "reviewed_at": null
+    }
+  ]
+}

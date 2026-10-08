@@ -237,10 +237,20 @@ def list_advisors() -> list[dict]:
 
 
 def pick_advisor() -> dict | None:
-    """Derivación: elige el asesor con menos conversaciones en handoff activas."""
+    """Derivación: elige el asesor con menos conversaciones en handoff activas.
+
+    Con la flag `presence_required` solo cuenta a los asesores con presencia
+    `available` y heartbeat vigente (nunca a uno ausente). Si no hay ninguno, la
+    conversación queda en cola (sin asignar) y el panel la muestra en "Libres"."""
+    from . import features, presence  # noqa: PLC0415 - evita import circular
     advisors = list_advisors()
     if not advisors:
         return None
+    if features.enabled("presence_required"):
+        snap = presence.snapshot()
+        advisors = [u for u in advisors if snap.get(u["email"], {}).get("status") == "available"]
+        if not advisors:
+            return None
     load = db.handoff_load_by_agent()
     return min(advisors, key=lambda u: (load.get(u["email"], 0), u["id"]))
 
@@ -249,14 +259,22 @@ def derive_to_advisor(conversation_id: str) -> str | None:
     """Asigna la conversación al asesor con menos carga y devuelve su email (o None).
 
     Usado por el handoff del grafo y por la recepción de comprobantes (Telegram/
-    WhatsApp): un solo punto de derivación para todo el sistema (DRY)."""
+    WhatsApp): un solo punto de derivación para todo el sistema (DRY). La asignación
+    es un claim atómico: si otro proceso la asignó un instante antes, se respeta."""
     advisor = pick_advisor()
     if advisor:
         try:
-            db.assign_conversation(conversation_id, advisor["email"])
+            if not db.claim_conversation(conversation_id, advisor["email"]):
+                current = (db.get_conversation(conversation_id) or {}).get("assigned_to")
+                return current
         except Exception:  # noqa: BLE001 - asignación best-effort, no rompe el flujo
             return None
         return advisor["email"]
+    try:
+        from . import observability  # noqa: PLC0415
+        observability.event("handoff.queued", conversation_id=conversation_id, reason="no_advisor_available")
+    except Exception:  # noqa: BLE001
+        pass
     return None
 
 

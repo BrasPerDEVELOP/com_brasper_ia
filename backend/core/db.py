@@ -363,6 +363,11 @@ def init_db() -> None:
     with connect() as con:
         con.executescript(_POSTGRES_SCHEMA if is_postgres() else _SQLITE_SCHEMA)
     _ensure_columns()
+    # Tablas de los módulos de atención autónoma (importación local: ellos importan db).
+    from . import idempotency, presence, public_docs  # noqa: PLC0415
+    idempotency.ensure_schema()
+    presence.ensure_schema()
+    public_docs.ensure_schema()
 
 
 def _ensure_columns() -> None:
@@ -374,12 +379,30 @@ def _ensure_columns() -> None:
     for ddl in ("ALTER TABLE conversations ADD COLUMN assigned_to TEXT",
                 "ALTER TABLE messages ADD COLUMN media_json TEXT",
                 "ALTER TABLE conversations ADD COLUMN lead_data TEXT",
-                "ALTER TABLE conversations ADD COLUMN customer_id INTEGER"):
+                "ALTER TABLE conversations ADD COLUMN customer_id INTEGER",
+                # Panel v2: quién escribió el mensaje saliente (bot vs asesor).
+                "ALTER TABLE messages ADD COLUMN sender TEXT",
+                "ALTER TABLE messages ADD COLUMN agent_email TEXT",
+                # Varios números WhatsApp: conexión (phone_number_id) de origen por conversación.
+                "ALTER TABLE conversations ADD COLUMN connection_id TEXT"):
         try:
             with connect() as con:
                 con.execute(ddl)
         except Exception:  # noqa: BLE001 - la columna ya existe
             pass
+    # Notas internas del asesor (no se envían al cliente).
+    notes_ddl = (
+        "CREATE TABLE IF NOT EXISTS conversation_notes ("
+        + ("id SERIAL PRIMARY KEY," if is_postgres() else "id INTEGER PRIMARY KEY AUTOINCREMENT,")
+        + " conversation_id TEXT NOT NULL, author TEXT, text TEXT NOT NULL, created_at TEXT NOT NULL)"
+    )
+    with connect() as con:
+        con.execute(notes_ddl)
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS conversation_tags ("
+            "conversation_id TEXT NOT NULL, tag TEXT NOT NULL, created_by TEXT, created_at TEXT NOT NULL, "
+            "PRIMARY KEY (conversation_id, tag))"
+        )
 
 
 def ping() -> bool:
@@ -449,7 +472,11 @@ def get_or_create_conversation(*args, conversation_id: str | None = None) -> str
         return cid
 
 
-def add_message(*args, media: dict | None = None) -> None:
+def add_message(*args, media: dict | None = None, sender: str | None = None,
+                agent_email: str | None = None) -> None:
+    """Guarda un mensaje. `sender` distingue quién habla del lado Brasper:
+    'user' (cliente), 'bot' (IA/flujos deterministas) o 'agent' (asesor humano).
+    Si no se indica, se deduce del role (user→user, assistant→bot)."""
     if len(args) == 4:
         tenant_id, conversation_id, role, content = args
     elif len(args) == 3:
@@ -457,19 +484,20 @@ def add_message(*args, media: dict | None = None) -> None:
     else:
         raise TypeError("add_message espera 3 o 4 argumentos")
     media_json = json.dumps(media, ensure_ascii=False) if media else None
+    sender = sender or ("user" if role == "user" else "bot")
     with connect() as con:
         if has_column("messages", "tenant_id"):
             con.execute(
                 "INSERT INTO messages "
-                "(conversation_id, tenant_id, role, content, media_json, created_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (conversation_id, tenant_id, role, content, media_json, _now()))
+                "(conversation_id, tenant_id, role, content, media_json, sender, agent_email, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (conversation_id, tenant_id, role, content, media_json, sender, agent_email, _now()))
         else:
             con.execute(
                 "INSERT INTO messages "
-                "(conversation_id, role, content, media_json, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (conversation_id, role, content, media_json, _now()))
+                "(conversation_id, role, content, media_json, sender, agent_email, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (conversation_id, role, content, media_json, sender, agent_email, _now()))
         con.execute(
             "UPDATE conversations SET updated_at=? WHERE id=?",
             (_now(), conversation_id))
@@ -612,6 +640,81 @@ def assign_conversation(*args) -> None:
         con.execute(sql, params)
 
 
+def claim_conversation(conversation_id: str, email: str) -> bool:
+    """Asignación con protección de concurrencia: solo si está libre o ya es del mismo
+    asesor. Devuelve False si otro asesor la tiene (409 en la API)."""
+    with connect() as con:
+        cur = con.execute(
+            "UPDATE conversations SET assigned_to=?, updated_at=? "
+            "WHERE id=? AND (assigned_to IS NULL OR assigned_to=? )",
+            (email, _now(), conversation_id, email))
+        return bool(cur.rowcount)
+
+
+def set_connection(conversation_id: str, connection_id: str | None) -> None:
+    if not connection_id:
+        return
+    with connect() as con:
+        con.execute("UPDATE conversations SET connection_id=? WHERE id=? AND connection_id IS NULL",
+                    (connection_id, conversation_id))
+
+
+# ---------- etiquetas (panel) ----------
+_TAG_MAX = 40
+
+
+def normalize_tag(tag: str) -> str:
+    t = " ".join(str(tag or "").strip().lower().split())
+    return t[:_TAG_MAX]
+
+
+def add_tag(conversation_id: str, tag: str, actor: str | None) -> list[str]:
+    t = normalize_tag(tag)
+    if not t:
+        raise ValueError("etiqueta vacía")
+    with connect() as con:
+        if is_postgres():
+            con.execute("INSERT INTO conversation_tags (conversation_id, tag, created_by, created_at) "
+                        "VALUES (?,?,?,?) ON CONFLICT DO NOTHING", (conversation_id, t, actor, _now()))
+        else:
+            con.execute("INSERT OR IGNORE INTO conversation_tags (conversation_id, tag, created_by, created_at) "
+                        "VALUES (?,?,?,?)", (conversation_id, t, actor, _now()))
+    return tags_for(conversation_id)
+
+
+def remove_tag(conversation_id: str, tag: str) -> list[str]:
+    with connect() as con:
+        con.execute("DELETE FROM conversation_tags WHERE conversation_id=? AND tag=?",
+                    (conversation_id, normalize_tag(tag)))
+    return tags_for(conversation_id)
+
+
+def tags_for(conversation_id: str) -> list[str]:
+    with connect() as con:
+        rows = con.execute("SELECT tag FROM conversation_tags WHERE conversation_id=? ORDER BY tag",
+                           (conversation_id,)).fetchall()
+    return [r["tag"] for r in rows]
+
+
+def tags_bulk(conversation_ids: list[str]) -> dict[str, list[str]]:
+    if not conversation_ids:
+        return {}
+    out: dict[str, list[str]] = {}
+    with connect() as con:
+        marks = ",".join("?" for _ in conversation_ids)
+        rows = con.execute(f"SELECT conversation_id, tag FROM conversation_tags WHERE conversation_id IN ({marks}) "
+                           "ORDER BY tag", tuple(conversation_ids)).fetchall()
+    for r in rows:
+        out.setdefault(r["conversation_id"], []).append(r["tag"])
+    return out
+
+
+def all_tags() -> list[dict]:
+    with connect() as con:
+        rows = con.execute("SELECT tag, COUNT(*) AS n FROM conversation_tags GROUP BY tag ORDER BY n DESC, tag").fetchall()
+    return [{"tag": r["tag"], "count": int(r["n"])} for r in rows]
+
+
 def handoff_load_by_agent(tenant_id: str = "brasper") -> dict[str, int]:
     """Conversaciones en handoff activas por asesor (para asignar al menos cargado)."""
     with connect() as con:
@@ -626,9 +729,18 @@ def handoff_load_by_agent(tenant_id: str = "brasper") -> dict[str, int]:
 
 
 def list_conversations(tenant_id: str = "brasper", limit: int = 50, assigned_to: str | None = None,
-                       include_unassigned: bool = False) -> list[dict]:
+                       include_unassigned: bool = False, status: str | None = None,
+                       channel: str | None = None, q: str | None = None,
+                       since: str | None = None, before: str | None = None,
+                       only_unassigned: bool = False, tag: str | None = None) -> list[dict]:
     """Conversaciones del sistema. Si `assigned_to` se da (vista de asesor), filtra a
-    las suyas; con `include_unassigned=True` incluye las libres (la cola por reclamar)."""
+    las suyas; con `include_unassigned=True` incluye las libres (la cola por reclamar).
+
+    Filtros del panel: `status` (active|handoff|closed), `channel`, `q` (texto en
+    user_ref / lead_data / último mensaje), `since` (updated_at > since, polling
+    incremental), `before` (updated_at < before, cursor de paginación) y
+    `only_unassigned` (cola de libres). Cada fila trae `last_message`, `last_role`,
+    `message_count`, `lead_name` y `waiting_since`."""
     if isinstance(tenant_id, int):
         limit, tenant_id = tenant_id, "brasper"
     where = "1=1"
@@ -642,19 +754,95 @@ def list_conversations(tenant_id: str = "brasper", limit: int = 50, assigned_to:
         else:
             where += " AND c.assigned_to=?"
         args.append(assigned_to)
-    args.append(limit)
+    if only_unassigned:
+        where += " AND c.assigned_to IS NULL"
+    if status:
+        where += " AND c.status=?"
+        args.append(status)
+    if channel:
+        where += " AND c.channel=?"
+        args.append(channel)
+    if since:
+        where += " AND c.updated_at>=?"  # inclusivo (resolucion de segundos); el panel fusiona por id
+        args.append(str(since))
+    if before:
+        where += " AND c.updated_at<?"
+        args.append(str(before))
+    if tag:
+        where += " AND EXISTS (SELECT 1 FROM conversation_tags t WHERE t.conversation_id=c.id AND t.tag=?)"
+        args.append(normalize_tag(tag))
+    if q:
+        like = f"%{q.strip().lower()}%"
+        where += (" AND (LOWER(c.user_ref) LIKE ? OR LOWER(COALESCE(c.lead_data,'')) LIKE ? "
+                  "OR LOWER(COALESCE((SELECT content FROM messages m WHERE m.conversation_id=c.id "
+                  "ORDER BY m.id DESC LIMIT 1),'')) LIKE ?)")
+        args.extend([like, like, like])
+    args.append(max(1, min(int(limit), 500)))
     with connect() as con:
         rows = con.execute(
             "SELECT c.*, (SELECT content FROM messages m WHERE m.conversation_id=c.id "
             "ORDER BY m.id DESC LIMIT 1) AS last_message, "
+            "(SELECT role FROM messages m WHERE m.conversation_id=c.id "
+            "ORDER BY m.id DESC LIMIT 1) AS last_role, "
             "(SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id "
             ") AS message_count "
             f"FROM conversations c WHERE {where} ORDER BY c.updated_at DESC LIMIT ?",
             tuple(args)).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k in ("updated_at", "started_at"):
+            if d.get(k) is not None and not isinstance(d[k], str):
+                d[k] = d[k].isoformat()
+        d["lead_name"] = _lead_name(d.get("lead_data"))
+        d["waiting_since"] = d.get("updated_at") if d.get("status") == "handoff" else None
+        out.append(d)
+    tags = tags_bulk([d["id"] for d in out])
+    for d in out:
+        d["tags"] = tags.get(d["id"], [])
+    return out
 
 
-def get_messages(*args) -> list[dict]:
+def _lead_name(raw: Any) -> str | None:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return None
+    name = data.get("nombre") if isinstance(data, dict) else None
+    return (str(name).strip() or None) if name else None
+
+
+# ---------- notas internas (panel) ----------
+def add_note(conversation_id: str, author: str | None, text: str) -> dict:
+    with connect() as con:
+        con.execute(
+            "INSERT INTO conversation_notes (conversation_id, author, text, created_at) VALUES (?,?,?,?)",
+            (conversation_id, author, text, _now()))
+        row = con.execute(
+            "SELECT * FROM conversation_notes WHERE conversation_id=? ORDER BY id DESC LIMIT 1",
+            (conversation_id,)).fetchone()
+    return _rowdict(row)
+
+
+def list_notes(conversation_id: str, limit: int = 100) -> list[dict]:
+    with connect() as con:
+        rows = con.execute(
+            "SELECT * FROM conversation_notes WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
+            (conversation_id, limit)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get("created_at") is not None and not isinstance(d["created_at"], str):
+            d["created_at"] = d["created_at"].isoformat()
+        out.append(d)
+    return out
+
+
+def get_messages(*args, after: str | None = None) -> list[dict]:
+    """Mensajes de una conversación en orden. Con `after` (created_at ISO) devuelve
+    solo los posteriores: el panel hace append en vez de recargar el hilo."""
     if len(args) == 2:
         tenant_id, conversation_id = args
     elif len(args) == 1:
@@ -662,16 +850,22 @@ def get_messages(*args) -> list[dict]:
     else:
         raise TypeError("get_messages espera 1 o 2 argumentos")
     with connect() as con:
-        sql = ("SELECT role, content, media_json, created_at FROM messages "
+        sql = ("SELECT role, content, media_json, sender, agent_email, created_at FROM messages "
                "WHERE conversation_id=?")
         params: tuple = (conversation_id,)
         if has_column("messages", "tenant_id"):
             sql += " AND tenant_id=?"
             params += (tenant_id,)
+        if after:
+            sql += " AND created_at>=?"  # inclusivo: el timestamp es de segundos; el panel deduplica
+            params += (str(after),)
         rows = con.execute(sql + " ORDER BY id", params).fetchall()
     out = []
     for r in rows:
         d = dict(r)
+        if d.get("created_at") is not None and not isinstance(d["created_at"], str):
+            d["created_at"] = d["created_at"].isoformat()  # Postgres devuelve datetime
+        d["sender"] = d.get("sender") or ("user" if d.get("role") == "user" else "bot")
         raw = d.pop("media_json", None)
         if raw:
             try:

@@ -1,8 +1,8 @@
 name: CI
 
 # Capa 2 del gate (ver AGENTS.md): corre en cada PR y en push a main.
-#  - backend: suite hermética sin LLM real ni red (SQLite temporal, API Brasper simulada)
-#  - web: type-check + build del panel Next.js
+#  - backend: suite hermética sin LLM real ni red (SQLite temporal, API Brasper simulada) + evals de escenarios
+#  - web: type-check + build del panel Next.js + Lighthouse (performance/a11y)
 on:
   pull_request:
   push:
@@ -35,6 +35,12 @@ jobs:
           APP_ENV: development
           PYTHONIOENCODING: utf-8
         run: python tests/run_checks.py
+      - name: Evals de escenarios ES/PT (deterministas, sin LLM real)
+        working-directory: backend
+        env:
+          APP_ENV: development
+          PYTHONIOENCODING: utf-8
+        run: python tests/evals/run.py
 
   web:
     name: Panel · type-check + build
@@ -55,3 +61,14 @@ jobs:
       - run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
+      - name: Lighthouse (performance >= 90, accesibilidad >= 95)
+        # Sin backend: /conversaciones muestra el login, /consumo la carcasa. Mide el shell del panel.
+        run: npx --yes @lhci/cli@0.14.0 autorun --config=lighthouserc.json
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lighthouse-report
+          path: web/.lighthouseci
+          retention-days: 7

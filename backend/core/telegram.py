@@ -9,7 +9,7 @@ import asyncio
 
 import httpx
 
-from . import audio_adapter, auth, db, engine, observability
+from . import audio_adapter, audio_flow, auth, db, engine, features, handoff_summary, idempotency, observability
 from core import tenants as T
 
 API = "https://api.telegram.org/bot{token}/{method}"
@@ -174,6 +174,10 @@ def allows_chat(chat_type: str) -> bool:
 async def process_update(body: dict) -> dict:
     """Pipeline compartido por webhook y poller."""
     tenant = T.get_config()
+    # Telegram reintenta el mismo update si no respondemos a tiempo: deduplicar.
+    if features.enabled("webhook_dedup") and idempotency.seen_event("telegram", body.get("update_id")):
+        observability.event("webhook.duplicate", channel="telegram", update_id=body.get("update_id"))
+        return {"handled": False, "duplicate": True}
     msg = parse_update(body)
     if not msg:
         return {"handled": False}
@@ -244,14 +248,23 @@ async def _handle_incoming_media(chat_id, msg: dict) -> dict:
     if caption:
         text += f" — {caption}"
     db.add_message(cid, "user", text, media={**media, "caption": caption})
+    # Límites de tipo: video/sticker no son comprobantes -> no derivan, se responde con cortesía.
+    if media["kind"] in ("video", "sticker"):
+        note = ("Recibí tu archivo, pero por aquí solo puedo procesar imágenes o PDF de comprobantes. "
+                "Si necesitas ayuda escribe *asesor*.")
+        db.add_message(cid, "assistant", note)
+        await send_message(chat_id, note)
+        return {"handled": True, "media": media["kind"], "ignored": True}
     db.merge_lead_data(cid, {"commercial_stage": "proof_received"})
     observability.event("message.media_received", tenant_id=tenant["id"],
                         conversation_id=cid, kind=media["kind"])
     status = db.conversation_status(cid)
     if status != "handoff":
+        handoff_summary_reason = "media"
         # Comprobante/adjunto -> lo revisa un humano: pausa el bot y asigna asesor.
         db.set_conversation_status(cid, "handoff")
         auth.derive_to_advisor(cid)
+        handoff_summary.build(cid, handoff_summary_reason)
         ack = ("Recibí tu comprobante 📎. Un asesor lo revisará y te contactará "
                "para completar tu envío.")
         db.add_message(cid, "assistant", ack)
@@ -281,17 +294,19 @@ async def _handle_incoming_audio(chat_id, msg: dict, cid: str) -> dict:
     observability.event("audio.transcribed", tenant_id=tenant["id"], conversation_id=cid,
                         provider=tr.get("provider"), chars=len(text))
     await send_typing(chat_id)
+
+    async def _send(reply: str) -> dict:
+        return await send_message(chat_id, reply)
+
     try:
-        # Un solo mensaje de usuario: texto = transcripción, media = audio original.
-        out = await engine.handle_message(f"tg:{chat_id}", text, channel="telegram",
-                                          conversation_id=cid, user_media={**media, "caption": text})
+        # Flujo compartido: evidencia (audio + transcripción), confirmación de cifras
+        # ambiguas y, si es legible, el grafo como texto normal.
+        out = await audio_flow.process_transcript(channel="telegram", user_ref=f"tg:{chat_id}", text=text,
+                                                  media=media, send=_send, conversation_id=cid)
     except engine.ConversationBusyError:
         return {"handled": False, "busy": True}
-    if out.get("paused") or not (out.get("response") or "").strip():
-        return {"handled": True, "paused": out.get("paused", False), "transcribed": True}
-    markup = build_handoff_markup() if out.get("handoff") else None
-    await send_message(chat_id, out["response"], reply_markup=markup)
-    return {"handled": True, "handoff": out.get("handoff", False), "transcribed": True}
+    return {"handled": True, "paused": out.get("paused", False), "transcribed": True,
+            "handoff": out.get("handoff", False), "ambiguous": out.get("ambiguous", False)}
 
 
 async def download_file(file_id: str) -> tuple[bytes | None, str | None]:

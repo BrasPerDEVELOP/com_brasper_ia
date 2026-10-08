@@ -9,6 +9,8 @@ from typing import Any, TypedDict
 from langgraph.graph import END, StateGraph
 
 from core import tenants as T
+from core import features, handoff_summary, knowledge, tool_contracts  # atención autónoma
+import time as _time
 from . import auth, calendar_adapter, connectors, db, lead_onboarding, llm, observability, policies, quotes, tool_router, util
 
 
@@ -64,6 +66,7 @@ class AgentState(TypedDict, total=False):
     usage: dict | None
     new_lead: bool
     banner: dict | None
+    flow: str
 
 
 # Intención de PROCEDER con el envío tras una cotización (checkout). Deben ser
@@ -79,6 +82,20 @@ _DEFAULT_CHECKOUT_KEYWORDS = (
     "acepto la cotizacion", "acepto la cotización", "quiero hacer el envio", "quiero hacer el envío",
     "quero pagar", "como faço o pagamento", "i want to proceed", "how do i pay",
 )
+
+
+_STATUS_HINTS = (
+    "estado de mi envio", "estado de mi envío", "estado del envio", "estado del envío", "ya llego", "ya llegó",
+    "llego mi", "llegó mi", "no ha llegado", "no llego", "no llegó", "cuando llega mi", "cuándo llega mi",
+    "donde esta mi dinero", "dónde está mi dinero", "seguimiento de mi", "rastrear mi", "tracking",
+    "meu envio chegou", "ja chegou", "já chegou", "nao chegou", "não chegou", "status do envio",
+    "cade meu", "cadê meu", "onde esta meu dinheiro", "onde está meu dinheiro", "has my transfer arrived",
+)
+
+
+def _status_hit(text: str) -> bool:
+    low = util.normalize_text(text)
+    return any(util.normalize_text(h) in low for h in _STATUS_HINTS)
 
 
 def _handoff_hit(text: str) -> bool:
@@ -137,12 +154,20 @@ def pre_process(state: AgentState) -> dict[str, Any]:
     tenant = T.get_config()
     is_calendar = calendar_adapter.enabled(tenant) and calendar_adapter.has_intent(state["text"])
     is_quote = quotes.has_intent(state["text"])
+    # "¿cuánto vale la cotización?" / "¿cómo cotizo?": pregunta informativa sin monto ni
+    # monedas -> la responde la FAQ con fuente, no el cotizador (que pediria datos).
+    if (is_quote and analysis.get("amount") is None and not analysis.get("currencies")
+            and features.enabled("knowledge") and knowledge.has_intent(state["text"])):
+        is_quote = False
     tool_request = None if is_quote else tool_router.select_tool(state["text"])
     checkout = (not is_quote) and _checkout_hit(state["text"])
     lead = db.get_lead_data(state["cid"])
     onboarding = (not is_quote) and lead_onboarding.needs_onboarding(
         lead, new_lead=bool(state.get("new_lead")), checkout=checkout, text=state["text"]
     )
+    status_q = (not is_quote) and features.enabled("status_intent") and _status_hit(state["text"])
+    info = ((not is_quote) and (not checkout) and (not status_q) and features.enabled("knowledge")
+            and knowledge.has_intent(state["text"]))
     return {
         "analysis": {
             **analysis,
@@ -151,6 +176,8 @@ def pre_process(state: AgentState) -> dict[str, Any]:
             "onboarding": onboarding,
             "calendar": is_calendar,
             "quote": is_quote,
+            "status": status_q,
+            "info": info,
             "tool": bool(tool_request),
         },
         "tool_request": tool_request,
@@ -166,13 +193,19 @@ def route_after_preprocess(state: AgentState) -> str:
         return "onboarding"
     if analysis.get("handoff"):
         return "handoff"
+    # Estado de un envío: la API IA no lo expone -> asesor con resumen (nunca inventar).
+    if analysis.get("status"):
+        return "status"
     if analysis.get("calendar"):
         return "calendar"
     if analysis.get("quote"):
         return "quote"
-    # Cliente quiere proceder con el envío/pago -> lo toma un asesor humano.
+    # Cliente quiere proceder con el envío/pago -> cuentas oficiales / asesor.
     if analysis.get("checkout"):
         return "deposit"
+    # Pregunta informativa -> FAQ aprobada con fuente (sin LLM).
+    if analysis.get("info"):
+        return "info"
     if analysis.get("tool"):
         return "tool"
     return "llm"
@@ -218,6 +251,7 @@ def _complete_deposit_accounts(cid: str, *,
         return {"response": reply, "handoff": False, "usage": None}
     db.set_conversation_status(cid, "handoff")
     assigned = auth.derive_to_advisor(cid)
+    handoff_summary.build(cid, "deposit_accounts_unavailable")
     observability.event("conversation.handoff", conversation_id=cid,
                         reason="deposit_accounts_unavailable", assigned_to=assigned)
     return {"response": reply, "handoff": True, "usage": None}
@@ -238,13 +272,115 @@ def handoff(state: AgentState) -> dict[str, Any]:
     tenant = T.get_config()
     checkout = bool(state.get("analysis", {}).get("checkout"))
     reply = _handoff_reply(checkout=checkout)
-    db.add_message(state["cid"], "assistant", reply)
     db.set_conversation_status(state["cid"], "handoff")
     # Derivación: asigna la conversación al asesor con menos carga (si hay).
     assigned = auth.derive_to_advisor(state["cid"])
+    reason = "checkout" if checkout else "keyword"
+    if assigned is None:
+        reply = f"{reply}\n\n{_queue_note(state.get('analysis', {}).get('language', 'es'))}"
+        reason = "no_advisor_available"
+    db.add_message(state["cid"], "assistant", reply)
+    handoff_summary.build(state["cid"], reason)
     observability.event("conversation.handoff", conversation_id=state["cid"],
-                        reason="checkout" if checkout else "keyword", assigned_to=assigned)
+                        reason=reason, assigned_to=assigned)
     return {"response": reply, "handoff": True, "usage": None}
+
+
+_QUEUE_NOTE = {
+    "es": "En este momento no hay asesores disponibles: tu solicitud queda en cola y te atenderemos en cuanto se libere uno.",
+    "pt": "No momento não há atendentes disponíveis: seu pedido fica na fila e atenderemos assim que um se liberar.",
+    "en": "No advisors are available right now: your request is queued and we'll attend you as soon as one is free.",
+}
+
+
+def _queue_note(language: str) -> str:
+    return _QUEUE_NOTE.get(language, _QUEUE_NOTE["es"])
+
+
+_STATUS_REPLY = {
+    "es": ("Para confirmarte el estado de tu envío necesito que lo verifique un asesor en el sistema de Brasper; "
+           "no quiero darte un dato sin comprobar. Ya le paso tu caso con el resumen y te responde aquí mismo."),
+    "pt": ("Para confirmar o status do seu envio preciso que um assessor verifique no sistema da Brasper; "
+           "não quero te passar um dado sem conferir. Já encaminho seu caso com o resumo e ele responde aqui mesmo."),
+    "en": ("To confirm your transfer status an advisor needs to verify it in Brasper's system; "
+           "I won't guess. I'm passing your case along with a summary and they'll reply right here."),
+}
+
+
+def handle_status(state: AgentState) -> dict[str, Any]:
+    """Consulta de estado de una operación: la API IA privada no expone esta
+    capacidad (contrato `status.lookup` no disponible), así que se deriva con resumen
+    en vez de inventar un estado."""
+    cid = state["cid"]
+    lang = state.get("analysis", {}).get("language", "es")
+    probe = tool_contracts.run("status.lookup", {}, lambda: None)
+    assert not probe.get("ok")  # documenta la ausencia de API; si algún día existe, se implementa aquí
+    reply = _STATUS_REPLY.get(lang, _STATUS_REPLY["es"])
+    db.set_conversation_status(cid, "handoff")
+    assigned = auth.derive_to_advisor(cid)
+    if assigned is None:
+        reply = f"{reply}\n\n{_queue_note(lang)}"
+    db.add_message(cid, "assistant", reply)
+    handoff_summary.build(cid, "status_lookup_unavailable")
+    observability.event("conversation.handoff", conversation_id=cid,
+                        reason="status_lookup_unavailable", assigned_to=assigned)
+    return {"response": reply, "handoff": True, "usage": None}
+
+
+def handle_info(state: AgentState) -> dict[str, Any]:
+    """Pregunta informativa: FAQ aprobada con fuente. Sin coincidencia -> incertidumbre
+    explícita (no inventa) y oferta de asesor; sin LLM en ambos casos."""
+    cid = state["cid"]
+    lang = state.get("analysis", {}).get("language", "es")
+    run = tool_contracts.run("knowledge.search", {"query": state["text"], "lang": lang}, knowledge.search)
+    hit = run.get("data") if run.get("ok") else None
+    if hit:
+        reply = knowledge.reply(hit, lang)
+        observability.event("knowledge.answered", conversation_id=cid, entry=hit["entry"]["id"], score=hit["score"])
+    else:
+        reply = knowledge.no_answer_reply(lang)
+        observability.event("knowledge.miss", conversation_id=cid)
+    db.add_message(cid, "assistant", reply)
+    return {"response": reply, "handoff": False, "usage": None}
+
+
+_REPEAT_FALLBACK = {
+    "es": ("Creo que te estoy repitiendo lo mismo y no te ayuda 🙏 ¿Me lo cuentas con otras palabras? "
+           "Si prefieres, escribe *asesor* y una persona continúa contigo aquí mismo."),
+    "pt": ("Acho que estou repetindo a mesma coisa e isso não ajuda 🙏 Pode me explicar com outras palavras? "
+           "Se preferir, escreva *atendente* e uma pessoa continua com você aqui mesmo."),
+    "en": ("I think I'm repeating myself and that isn't helping 🙏 Could you rephrase? "
+           "Or type *advisor* and a person will continue with you right here."),
+}
+_REPEAT_HANDOFF = {
+    "es": "No estoy logrando ayudarte bien con esto. Te paso con un asesor para que lo resuelva contigo aquí mismo.",
+    "pt": "Não estou conseguindo te ajudar bem com isso. Vou te passar para um atendente resolver com você aqui mesmo.",
+    "en": "I'm not managing to help you well with this. I'm passing you to an advisor right here.",
+}
+
+
+def _anti_loop(cid: str, reply: str, language: str) -> tuple[str, bool]:
+    """Límite de repeticiones del bot: la primera repetición idéntica se reemplaza por
+    una invitación a reformular; la segunda deriva a un asesor con resumen."""
+    if not features.enabled("anti_loop"):
+        return reply, False
+    history = [m for m in db.get_history(cid, limit=6) if m.get("role") == "assistant"]
+    last = util.normalize_text(history[-1]["content"]) if history else ""
+    lead = db.get_lead_data(cid)
+    count = int(lead.get("repeat_count") or 0)
+    if not last or util.normalize_text(reply) != last:
+        if count:
+            db.merge_lead_data(cid, {"repeat_count": 0})
+        return reply, False
+    count += 1
+    db.merge_lead_data(cid, {"repeat_count": count})
+    observability.event("bot.repetition", conversation_id=cid, count=count)
+    if count >= 2:
+        db.set_conversation_status(cid, "handoff")
+        auth.derive_to_advisor(cid)
+        handoff_summary.build(cid, "repetition")
+        return _REPEAT_HANDOFF.get(language, _REPEAT_HANDOFF["es"]), True
+    return _REPEAT_FALLBACK.get(language, _REPEAT_FALLBACK["es"]), False
 
 
 def paused(state: AgentState) -> dict[str, Any]:
@@ -474,6 +610,7 @@ def llm_failed(state: AgentState) -> dict[str, Any]:
     if db.conversation_status(cid) != "handoff":
         db.set_conversation_status(cid, "handoff")
         assigned = auth.derive_to_advisor(cid)
+    handoff_summary.build(cid, "llm_error", extra=(state.get("llm_error") or "")[:120])
     observability.event("conversation.handoff", conversation_id=cid,
                         reason="llm_error", assigned_to=assigned)
     return {"response": reply, "handoff": True, "usage": None}
@@ -484,6 +621,7 @@ def persist_llm(state: AgentState) -> dict[str, Any]:
     result = state["llm_result"]
     # Guard final: el LLM nunca deriva a un canal externo, pase lo que pase.
     content = sanitize_no_external_channels(result["content"])
+    content, looped = _anti_loop(state["cid"], content, state.get("analysis", {}).get("language", "es"))
     db.add_message(state["cid"], "assistant", content)
     db.add_usage(
         state["cid"],
@@ -498,7 +636,7 @@ def persist_llm(state: AgentState) -> dict[str, Any]:
                         tokens_out=result["tokens_out"], cost_usd=result["cost_usd"])
     return {
         "response": content,
-        "handoff": False,
+        "handoff": looped,
         "usage": {
             "tokens_in": result["tokens_in"],
             "tokens_out": result["tokens_out"],
@@ -520,6 +658,8 @@ def graph():
     workflow.add_node("handle_calendar", handle_calendar)
     workflow.add_node("handle_quote", handle_quote)
     workflow.add_node("handle_tool", handle_tool)
+    workflow.add_node("handle_info", handle_info)
+    workflow.add_node("handle_status", handle_status)
     workflow.add_node("build_messages", build_messages)
     workflow.add_node("call_llm", call_llm)
     workflow.add_node("persist_llm", persist_llm)
@@ -531,9 +671,11 @@ def graph():
         "pre_process",
         route_after_preprocess,
         {"paused": "bot_paused", "onboarding": "handle_onboarding", "deposit": "handle_deposit_accounts",
-         "handoff": "do_handoff", "calendar": "handle_calendar",
-         "quote": "handle_quote", "tool": "handle_tool", "llm": "build_messages"},
+         "handoff": "do_handoff", "calendar": "handle_calendar", "status": "handle_status",
+         "quote": "handle_quote", "info": "handle_info", "tool": "handle_tool", "llm": "build_messages"},
     )
+    workflow.add_edge("handle_info", END)
+    workflow.add_edge("handle_status", END)
     workflow.add_edge("handle_onboarding", END)
     workflow.add_edge("handle_deposit_accounts", END)
     workflow.add_edge("bot_paused", END)
@@ -554,10 +696,33 @@ def graph():
     return workflow.compile()
 
 
+def _flow_name(state: dict) -> str:
+    """Nombre del flujo que produjo la respuesta (para métricas por flujo)."""
+    a = state.get("analysis", {}) or {}
+    if state.get("paused"):
+        return "paused"
+    if state.get("llm_error"):
+        return "llm_failed"
+    for key, name in (("onboarding", "onboarding"), ("handoff", "handoff"), ("status", "status"),
+                      ("calendar", "calendar")):
+        if a.get(key):
+            return name
+    if a.get("quote"):
+        return "quote" if state.get("usage") is None else "quote_clarify_llm"
+    if a.get("checkout"):
+        return "deposit"
+    if a.get("info"):
+        return "info"
+    if a.get("tool"):
+        return "tool"
+    return "llm"
+
+
 async def handle_message(user_ref: str, text: str,
                          channel: str = "webchat",
                          conversation_id: str | None = None,
                          user_media: dict | None = None) -> dict:
+    t0 = _time.perf_counter()
     state = await graph().ainvoke({
         "user_ref": user_ref,
         "text": text,
@@ -565,7 +730,10 @@ async def handle_message(user_ref: str, text: str,
         "conversation_id": conversation_id,
         "user_media": user_media,
     })
+    flow = _flow_name(state)
+    observability.record_flow(flow, (_time.perf_counter() - t0) * 1000, ok=not state.get("llm_error"))
     return {
+        "flow": flow,
         "response": state.get("response", ""),
         "conversation_id": state["cid"],
         "handoff": state.get("handoff", False),

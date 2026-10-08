@@ -105,10 +105,58 @@ def set_secret_refs(tenant_id: str, refs: dict[str, str]) -> dict:
     return _save_brasper(cfg)
 
 
+def whatsapp_connections(cfg: dict | None = None) -> list[dict]:
+    """Conexiones WhatsApp de Brasper (varios números). Cada una resuelve sus secretos
+    por referencia `*_env`. Modalidades: `standard` (Cloud API) o `coex` (número que
+    sigue activo en la app WhatsApp Business). Si `whatsapp.connections` no existe se
+    expone la configuración única histórica como conexión `default`."""
+    if cfg is None:
+        cfg = get_config()
+    wa = cfg.get("whatsapp", {}) or {}
+    out: list[dict] = []
+    for i, c in enumerate(wa.get("connections") or []):
+        if not isinstance(c, dict):
+            continue
+        out.append({
+            "id": str(c.get("id") or f"wa{i + 1}"),
+            "label": c.get("label") or c.get("id") or f"WhatsApp {i + 1}",
+            "mode": "coex" if str(c.get("mode", "standard")).lower() == "coex" else "standard",
+            "phone_number_id": resolve_secret(c, "phone_number_id", "phone_number_id_env"),
+            "token": resolve_secret(c, "token", "token_env"),
+            "waba_id": c.get("waba_id"),
+            "display_phone": c.get("display_phone"),
+        })
+    if not out:
+        pnid = whatsapp_phone_number_id(cfg)
+        if pnid or whatsapp_token(cfg):
+            out.append({"id": "default", "label": wa.get("label") or "WhatsApp principal",
+                        "mode": "coex" if str(wa.get("mode", "standard")).lower() == "coex" else "standard",
+                        "phone_number_id": pnid, "token": whatsapp_token(cfg),
+                        "waba_id": wa.get("waba_id"), "display_phone": wa.get("display_phone")})
+    return out
+
+
+def resolve_whatsapp_connection(phone_number_id: str | None, cfg: dict | None = None) -> dict | None:
+    if not phone_number_id:
+        return None
+    for c in whatsapp_connections(cfg):
+        if c.get("phone_number_id") and str(c["phone_number_id"]) == str(phone_number_id):
+            return c
+    return None
+
+
+def whatsapp_connection_by_id(connection_id: str | None, cfg: dict | None = None) -> dict | None:
+    conns = whatsapp_connections(cfg)
+    if connection_id:
+        for c in conns:
+            if c["id"] == connection_id:
+                return c
+    return conns[0] if conns else None
+
+
 def resolve_by_phone_number_id(phone_number_id: str) -> dict | None:
     cfg = get_config()
-    expected = whatsapp_phone_number_id(cfg)
-    return cfg if expected and str(expected) == str(phone_number_id) else None
+    return cfg if resolve_whatsapp_connection(phone_number_id, cfg) else None
 
 def resolve_secret(cfg: dict, key: str, env_key: str) -> str | None:
     if cfg.get(key):

@@ -34,8 +34,8 @@ Bot IA de Brasper (remesas Perú↔Brasil) para WhatsApp, Telegram y webchat, co
 
 | Capa | Comando / artefacto |
 |------|---------------------|
-| 1 Local | `cd backend && ../.venv/bin/python tests/run_checks.py` (Windows: `..\.venv\Scripts\python.exe tests\run_checks.py`) + `python -m doctest core/policies.py` |
-| 2 CI PR | `.github/workflows/ci.yml` — backend `run_checks` + doctests, panel `tsc` + `next build` |
+| 1 Local | `cd backend && ../.venv/bin/python tests/run_checks.py` (Windows: `..\.venv\Scripts\python.exe tests\run_checks.py`) + `python -m doctest core/policies.py` + evals `python tests/evals/run.py` (54 escenarios ES/PT, sin LLM real) |
+| 2 CI PR | `.github/workflows/ci.yml` — backend `run_checks` + doctests + evals, panel `tsc` + `next build` + Lighthouse (`web/lighthouserc.json`: performance ≥ 90, a11y ≥ 95) |
 | 3 Gate | Casos del propio `run_checks`: cotizador sin LLM, anti-alucinación (API exclusiva), handoff, onboarding |
 | 4 Deploy | `backend/tests/e2e_smoke.py` contra el servidor vivo: health + login + cotización + handoff |
 
@@ -51,9 +51,18 @@ Canal (WhatsApp/Telegram/webchat) → api/routes.py → core/engine.py (lock Red
       ├─ quotes.py (determinista, SIN LLM) → brasper_api.py (TC/comisiones/cupones en vivo)
       ├─ lead_onboarding.py (identidad progresiva, clientes Brasper, cuentas de depósito)
       ├─ handoff → auth.derive_to_advisor (asesor con menos carga)
-      ├─ tool_router.py → connectors.py (externalApis declarativas)
-      └─ llm.py (DeepSeek / OpenAI-compatible) solo para conversación libre
+      ├─ knowledge.py (FAQ aprobada con fuente, sin LLM) · handle_status (estado de envío → asesor con resumen)
+      ├─ tool_router.py → connectors.py (externalApis declarativas) · tool_contracts.py (contratos tipados, timeout, idempotencia)
+      ├─ handoff_summary.py (resumen de derivación) · presence.py (presencia de asesores) · idempotency.py (dedup de webhooks)
+      ├─ audio_flow.py + audio_review.py (audios: evidencia, cifras ambiguas → confirmación)
+      └─ llm.py (DeepSeek / OpenAI-compatible) solo para conversación libre (con anti-bucle)
 ```
+
+**Regla de conocimiento:** preguntas informativas se responden **solo** con entradas `approved` de `backend/data/knowledge/brasper/faq.json`, citando fuente y fecha; sin entrada aprobada el bot declara incertidumbre y ofrece asesor. Las entradas `draft` nunca se sirven.
+
+**Flags** (`tenants.json → features`, ver `core/features.py`): `knowledge`, `status_intent`, `anti_loop`, `audio_confirmation`, `webhook_dedup`, `presence_required`, `coex`. Permiten activar/revertir cada capacidad sin redesplegar.
+
+**WhatsApp:** `whatsapp.connections` admite varios números (API estándar o `coex`); cada conversación guarda `connection_id` y las respuestas salen por el número de origen. Los ecos de la app del celular (`smb_message_echoes`) son actividad humana: pausan el bot y nunca generan respuesta.
 
 **Regla de launch:** cotizaciones, cupones, montos y cuentas **solo** vía `quotes.py` / `brasper_api.py`. El LLM **no inventa tasas**. Si la API Brasper falla, el cotizador rechaza la cotización (nunca usa una tasa local como respaldo).
 
@@ -72,7 +81,7 @@ Canal (WhatsApp/Telegram/webchat) → api/routes.py → core/engine.py (lock Red
 | Onboarding / clientes | `backend/core/lead_onboarding.py` |
 | Tools genéricas | `backend/core/tool_router.py` + `connectors.py` |
 | Config | `backend/config/tenants.json` (`tenants.brasper`) + Admin API |
-| Panel | `web/` (Next.js) |
+| Panel | `web/` (Next.js). Bandeja en `web/components/inbox/*`; tokens de marca en `web/app/globals.css`; plan UX en `docs/plans/PLAN-PANEL-UX-2026-10.md` |
 
 ## Convenciones
 
@@ -94,11 +103,11 @@ Canal (WhatsApp/Telegram/webchat) → api/routes.py → core/engine.py (lock Red
 |------|--------|-----|
 | **0** Unificar Brasper en `backend/` | ✅ Hecho | [docs/plans/FASE-0.md](docs/plans/FASE-0.md) |
 | **1** Vertical Remesas + anti-alucinación | 🟡 Parcial (en `quotes.py` / `run_checks`) | [docs/plans/FASE-1.md](docs/plans/FASE-1.md) |
-| **2** CI + evals + smoke | 🟡 CI y smoke listos; evals golden pendientes | [docs/plans/FASE-2.md](docs/plans/FASE-2.md) |
-| **3** FAQ / RAG ligero | 🔲 | [docs/plans/FASE-3.md](docs/plans/FASE-3.md) |
+| **2** CI + evals + smoke | 🟢 CI, smoke y evals de escenarios (`tests/evals`) en CI | [docs/plans/FASE-2.md](docs/plans/FASE-2.md) |
+| **3** FAQ / RAG ligero | 🟡 FAQ con fuente en `core/knowledge.py` (13 aprobadas, 3 borradores comerciales) | [docs/plans/FASE-3.md](docs/plans/FASE-3.md) |
 | **4** Launch ops | 🔲 | [docs/plans/FASE-4.md](docs/plans/FASE-4.md) |
 
-Índice: [docs/plans/00-ROADMAP.md](docs/plans/00-ROADMAP.md) · Plan de mejoras: [docs/plans/PLAN-MEJORAS-2026-10.md](docs/plans/PLAN-MEJORAS-2026-10.md)  
+Índice: [docs/plans/00-ROADMAP.md](docs/plans/00-ROADMAP.md) · Plan de mejoras: [docs/plans/PLAN-MEJORAS-2026-10.md](docs/plans/PLAN-MEJORAS-2026-10.md) · Plan UX panel: [docs/plans/PLAN-PANEL-UX-2026-10.md](docs/plans/PLAN-PANEL-UX-2026-10.md) · Atención autónoma: [docs/plans/PLAN-ATENCION-AUTONOMA-2026-10.md](docs/plans/PLAN-ATENCION-AUTONOMA-2026-10.md) (diagnóstico: [docs/plans/ATENCION-AUTONOMA-ETAPA-0.md](docs/plans/ATENCION-AUTONOMA-ETAPA-0.md))  
 Mapa: [FEATURE_MAP.md](FEATURE_MAP.md)  
 Prompts: [docs/PROMPT-FASES.md](docs/PROMPT-FASES.md)
 

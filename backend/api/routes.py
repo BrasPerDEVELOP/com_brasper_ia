@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
 from core import db, engine, whatsapp, connectors, wa_templates, auth, telegram, rate_limit, redis_runtime, jobs, debounce, observability, alerts, audio_adapter, util, brasper_api, llm
+from core import audio_flow, features, handoff_summary, idempotency, knowledge, presence, public_docs, tool_contracts
 from core import tenants as T
 
 router = APIRouter()
@@ -154,66 +155,125 @@ def webhook_verify(mode: str = Query(None, alias="hub.mode"),
     raise HTTPException(status_code=403, detail="Verify token inválido")
 
 
-async def _handle_whatsapp_audio(tenant: dict, msg: dict, user_ref: str) -> dict:
+async def _handle_whatsapp_audio(tenant: dict, msg: dict, user_ref: str, conn: dict | None = None) -> dict:
     """Audio entrante de WhatsApp: se difiere al worker para transcribir. Si no
     hay Redis/worker, se transcribe en línea como fallback para no perder el
-    mensaje (más lento, pero el webhook igual responde y no crashea)."""
+    mensaje. En ambos casos se conserva el audio como evidencia (burbuja reproducible
+    en el panel), se confirman cifras ambiguas y, si falla la transcripción, pasa a un
+    asesor en vez de perderse. Recibir un audio NO deriva por sí mismo."""
     base = {"tenant": tenant["id"], "from": msg["from"], "resolved": True, "audio": True}
     payload = {
         "tenant_id": tenant["id"], "channel": "whatsapp",
         "user_ref": user_ref, "to": msg["from"],
         "media_id": msg.get("media_id"), "mime_type": msg.get("mime_type"),
+        "connection_id": (conn or {}).get("id"),
     }
     if jobs.enqueue("whatsapp.audio", payload):
         return {**base, "queued": True}
+    media = {"provider": "whatsapp", "kind": "audio", "ref": msg.get("media_id"), "mime": msg.get("mime_type")}
+
+    async def _send(text: str) -> dict:
+        return await whatsapp.send_text(msg["from"], text, connection=conn)
+
     try:
         tr = await audio_adapter.transcribe_whatsapp(tenant, msg.get("media_id"))
     except Exception as e:  # noqa: BLE001 - fallback en línea, no debe romper el webhook
-        return {**base, "sent": False, "reason": f"audio: {e}"}
+        tr = {"ok": False, "error": str(e)[:120]}
     if not tr.get("ok") or not (tr.get("text") or "").strip():
-        return {**base, "sent": False, "reason": f"audio no transcrito: {tr.get('error')}"}
-    out = await engine.handle_message(user_ref, tr["text"].strip(), channel="whatsapp")
-    # Un asesor puede haber tomado la conversación: el bot no responde por encima.
-    if out.get("paused") or not (out.get("response") or "").strip():
-        return {**base, "transcribed": True, "sent": False, "paused": True}
-    send = await whatsapp.send_text(msg["from"], out["response"])
-    return {**base, "transcribed": True, "sent": send.get("sent", False)}
+        out = await audio_flow.unreadable(channel="whatsapp", user_ref=user_ref, media=media, send=_send,
+                                          error=tr.get("error"))
+        return {**base, "transcribed": False, "sent": out.get("sent", False), "reason": "audio no transcrito"}
+    try:
+        out = await audio_flow.process_transcript(channel="whatsapp", user_ref=user_ref, text=tr["text"].strip(),
+                                                  media=media, send=_send)
+    except engine.ConversationBusyError as e:
+        return {**base, "sent": False, "reason": str(e)}
+    if out.get("conversation_id") and conn:
+        db.set_connection(out["conversation_id"], conn["id"])
+    return {**base, "transcribed": True, "sent": out.get("sent", False), "paused": out.get("paused", False),
+            "ambiguous": out.get("ambiguous", False)}
 
 
 _WA_MEDIA_LABEL = {"image": "🖼️ Imagen", "document": "📎 Archivo",
                    "video": "🎬 Video", "sticker": "🌟 Sticker"}
 
 
-async def _handle_whatsapp_media(tenant: dict, msg: dict, user_ref: str) -> dict:
-    """Media entrante de WhatsApp: se guarda como mensaje del usuario (visible en el
-    panel) y la conversación pasa a manos de un asesor (el bot no procesa archivos)."""
+_PROOF_MIMES = ("image/", "application/pdf")
+_PROOF_ACK = ("Recibí tu comprobante 📎. Un asesor lo validará en el sistema de Brasper; "
+              "el envío se confirma solo cuando el pago quede verificado. Te aviso aquí mismo.")
+_UNSUPPORTED_ACK = ("Recibí tu archivo, pero por aquí solo puedo procesar imágenes o PDF de comprobantes. "
+                    "Si necesitas ayuda escribe *asesor*.")
+
+
+async def _handle_whatsapp_media(tenant: dict, msg: dict, user_ref: str, conn: dict | None = None) -> dict:
+    """Media entrante de WhatsApp: se guarda como mensaje del usuario (evidencia visible
+    en el panel). Imagen/PDF se tratan como posible comprobante -> lo valida un asesor
+    (el comprobante NUNCA se confunde con un pago confirmado). Video/sticker y otros
+    formatos no derivan: se responde con cortesía y se conservan."""
     kind = msg["type"]
     cid = db.get_or_create_conversation(user_ref, "whatsapp")
+    if conn:
+        db.set_connection(cid, conn["id"])
     name = msg.get("filename") or ""
     caption = (msg.get("caption") or "").strip()
     label = _WA_MEDIA_LABEL.get(kind, "📎 Adjunto")
     text = label + (f": {name}" if name and kind not in ("image", "sticker") else "")
     if caption:
         text += f" — {caption}"
+    mime = msg.get("mime_type") or ""
     media = {"provider": "whatsapp", "kind": kind, "ref": msg.get("media_id"),
-             "mime": msg.get("mime_type"), "name": name or None, "caption": caption}
+             "mime": mime, "name": name or None, "caption": caption}
     db.add_message(cid, "user", text, media=media)
-    db.merge_lead_data(cid, {"commercial_stage": "proof_received"})
-    observability.event("message.media_received", tenant_id=tenant["id"], conversation_id=cid, kind=kind)
+    observability.event("message.media_received", tenant_id=tenant["id"], conversation_id=cid, kind=kind, mime=mime)
+    is_proof = kind in ("image", "document") and (not mime or mime.startswith(_PROOF_MIMES))
     sent = False
+    if not is_proof:
+        if db.conversation_status(cid) != "handoff":
+            db.add_message(cid, "assistant", _UNSUPPORTED_ACK)
+            r = await whatsapp.send_text(msg["from"], _UNSUPPORTED_ACK, connection=conn)
+            sent = r.get("sent", False)
+        return {"tenant": tenant["id"], "from": msg["from"], "resolved": True,
+                "media": kind, "sent": sent, "ignored": True}
+    db.merge_lead_data(cid, {"commercial_stage": "proof_received", "proof_validated": False})
     if db.conversation_status(cid) != "handoff":
-        # Comprobante/adjunto -> lo revisa un humano: pausa el bot y asigna asesor.
+        # Comprobante -> lo valida un humano en el sistema: pausa el bot y asigna asesor.
         db.set_conversation_status(cid, "handoff")
-        auth.derive_to_advisor(cid)
-        ack = ("Recibí tu comprobante 📎. Un asesor lo revisará y te contactará "
-               "para completar tu envío.")
-        db.add_message(cid, "assistant", ack)
-        r = await whatsapp.send_text(msg["from"], ack)
+        assigned = auth.derive_to_advisor(cid)
+        handoff_summary.build(cid, "media", extra=f"{kind} {name}".strip())
+        db.add_message(cid, "assistant", _PROOF_ACK)
+        r = await whatsapp.send_text(msg["from"], _PROOF_ACK, connection=conn)
         sent = r.get("sent", False)
         observability.event("conversation.handoff", tenant_id=tenant["id"],
-                            conversation_id=cid, reason="media")
+                            conversation_id=cid, reason="media", assigned_to=assigned)
     return {"tenant": tenant["id"], "from": msg["from"], "resolved": True,
             "media": kind, "sent": sent}
+
+
+async def _handle_whatsapp_echo(tenant: dict, msg: dict, conn: dict | None) -> dict:
+    """Coexistencia: un mensaje enviado desde la app WhatsApp Business del celular
+    (`smb_message_echoes`) es actividad HUMANA. Se guarda como mensaje del asesor en la
+    conversación del destinatario, pausa el bot (takeover) y nunca genera respuesta.
+    Solo aplica si la conexión está en modo coex y la flag `coex` está activa."""
+    base = {"tenant": tenant["id"], "to": msg.get("to"), "resolved": True, "echo": True}
+    if not (features.enabled("coex") and conn and conn.get("mode") == "coex"):
+        observability.event("webhook.echo_ignored", reason="coex_disabled", connection=(conn or {}).get("id"))
+        return {**base, "ignored": True}
+    if not msg.get("to"):
+        return {**base, "ignored": True, "reason": "sin destinatario"}
+    cid = db.get_or_create_conversation(f"wa:{msg['to']}", "whatsapp")
+    db.set_connection(cid, conn["id"])
+    text = (msg.get("text") or "").strip() or f"📱 {msg.get('kind') or 'mensaje'} enviado desde el celular"
+    # Evitar que un eco de un mensaje que YA guardó la API cuente dos veces.
+    last = db.get_messages(cid)[-1:] if text else []
+    if last and last[0].get("role") == "assistant" and (last[0].get("content") or "").strip() == text:
+        return {**base, "ignored": True, "reason": "eco de la API"}
+    db.add_message(cid, "assistant", text, sender="agent", agent_email="whatsapp-app")
+    if db.conversation_status(cid) != "handoff":
+        db.set_conversation_status(cid, "handoff")
+        handoff_summary.build(cid, "coex_human")
+        observability.event("conversation.handoff", conversation_id=cid, reason="coex_human")
+    db.merge_lead_data(cid, {"last_human_source": "whatsapp-app"})
+    return {**base, "conversation_id": cid, "takeover": True}
 
 
 @router.post("/webhook")
@@ -230,21 +290,51 @@ async def webhook_receive(request: Request):
 
     results = []
     for msg in whatsapp.parse_incoming(body):
-        tenant = T.resolve_by_phone_number_id(msg["phone_number_id"])
+        tenant = T.resolve_by_phone_number_id(msg.get("phone_number_id"))
         if not tenant:
-            results.append({"from": msg["from"], "resolved": False})
+            results.append({"from": msg.get("from"), "resolved": False})
+            continue
+        conn = T.resolve_whatsapp_connection(msg.get("phone_number_id"), tenant)
+        kind = msg.get("type")
+
+        # Eventos que NUNCA disparan respuestas: entregas e historial/sincronización Coex.
+        if kind == "status":
+            observability.event("whatsapp.status", status=msg.get("status"), message_id=msg.get("id"))
+            results.append({"tenant": tenant["id"], "resolved": True, "status": msg.get("status")})
+            continue
+        if kind in ("history", "state_sync"):
+            observability.event("whatsapp.coex_sync", kind=kind, keys=msg.get("raw_keys"))
+            results.append({"tenant": tenant["id"], "resolved": True, "sync": kind, "ignored": True})
+            continue
+        if kind == "echo":
+            if features.enabled("webhook_dedup") and idempotency.seen_event("whatsapp", msg.get("id")):
+                results.append({"tenant": tenant["id"], "resolved": True, "duplicate": True})
+                continue
+            results.append(await _handle_whatsapp_echo(tenant, msg, conn))
+            continue
+
+        # Deduplicación: Meta reintenta el mismo mensaje si no respondemos a tiempo.
+        if features.enabled("webhook_dedup") and idempotency.seen_event("whatsapp", msg.get("id")):
+            observability.event("webhook.duplicate", channel="whatsapp", message_id=msg.get("id"))
+            results.append({"tenant": tenant["id"], "from": msg.get("from"), "resolved": True, "duplicate": True})
+            continue
+        if kind == "unsupported":
+            results.append({"tenant": tenant["id"], "from": msg.get("from"), "resolved": True,
+                            "ignored": True, "kind": msg.get("kind")})
             continue
         user_ref = f"wa:{msg['from']}"
+        contact = msg.get("contact") or {}
 
-        if msg.get("type") == "audio":
-            results.append(await _handle_whatsapp_audio(tenant, msg, user_ref))
+        if kind == "audio":
+            results.append(await _handle_whatsapp_audio(tenant, msg, user_ref, conn))
             continue
-        if msg.get("type") in ("image", "document", "video", "sticker"):
-            results.append(await _handle_whatsapp_media(tenant, msg, user_ref))
+        if kind in ("image", "document", "video", "sticker"):
+            results.append(await _handle_whatsapp_media(tenant, msg, user_ref, conn))
             continue
 
         if debounce.buffer_message(
-            tenant["id"], "whatsapp", user_ref, msg["text"], {"to": msg["from"]},
+            tenant["id"], "whatsapp", user_ref, msg["text"],
+            {"to": msg["from"], "connection_id": (conn or {}).get("id")},
         ):
             results.append({"tenant": tenant["id"], "from": msg["from"],
                             "resolved": True, "queued": True})
@@ -256,24 +346,35 @@ async def webhook_receive(request: Request):
             results.append({"tenant": tenant["id"], "from": msg["from"],
                             "resolved": True, "sent": False, "reason": str(e)})
             continue
+        cid = out.get("conversation_id")
+        if cid:
+            if conn:
+                db.set_connection(cid, conn["id"])
+            # Identidad del remitente (nombre de perfil, wa_id y campos adicionales de Meta
+            # como identificadores con alcance de negocio): se conservan sin asumir su
+            # semántica. El teléfono sigue siendo `from` mientras Meta lo exponga.
+            ident = {k: v for k, v in (("wa_profile_name", contact.get("profile_name")),
+                                       ("wa_id", contact.get("wa_id")),
+                                       ("wa_identity", contact.get("identity"))) if v}
+            if ident:
+                db.merge_lead_data(cid, ident)
         # Lead nuevo: banner de primer envío antes de la respuesta.
         banner = out.get("banner")
         if banner:
             if banner.get("image_url"):
-                await whatsapp.send_image(msg["from"], banner["image_url"], banner.get("text") or "")
+                await whatsapp.send_image(msg["from"], banner["image_url"], banner.get("text") or "", connection=conn)
             elif banner.get("text"):
-                await whatsapp.send_text(msg["from"], banner["text"])
-            if out.get("conversation_id"):
-                db.add_message(out["conversation_id"], "assistant",
-                               banner.get("text") or "🎁 Banner primer envío")
+                await whatsapp.send_text(msg["from"], banner["text"], connection=conn)
+            if cid:
+                db.add_message(cid, "assistant", banner.get("text") or "🎁 Banner primer envío")
         if out.get("paused") or not (out.get("response") or "").strip():
             # Un asesor humano atiende esta conversación: el bot no responde.
             results.append({"tenant": tenant["id"], "from": msg["from"],
                             "resolved": True, "sent": False, "paused": True})
             continue
-        send = await whatsapp.send_text(msg["from"], out["response"])
+        send = await whatsapp.send_text(msg["from"], out["response"], connection=conn)
         results.append({"tenant": tenant["id"], "from": msg["from"],
-                        "resolved": True, "sent": send.get("sent", False)})
+                        "resolved": True, "sent": send.get("sent", False), "flow": out.get("flow")})
     return {"received": len(results), "results": results}
 
 
@@ -482,31 +583,61 @@ def _assert_conversation_access(user: dict, conv: dict) -> None:
 
 
 @router.get("/api/conversations")
-def conversations(user: dict = Depends(auth.require("conversations:read"))):
+def conversations(status: str | None = None, channel: str | None = None,
+                  assigned: str | None = None, q: str | None = None,
+                  since: str | None = None, before: str | None = None, tag: str | None = None,
+                  limit: int = Query(100, ge=1, le=500),
+                  user: dict = Depends(auth.require("conversations:read"))):
+    """Bandeja del panel con filtros opcionales.
+
+    - `status`: active | handoff | closed · `channel`: whatsapp | telegram | webchat
+    - `assigned`: `me` (las mías), `none` (libres, cola) o un email
+    - `q`: texto libre (número, nombre del lead, último mensaje)
+    - `since`: solo conversaciones con `updated_at` posterior (polling incremental)
+    - `before`: cursor de paginación (`updated_at` anterior) · `limit`: tamaño de página
+    """
     tenant = T.get_config()
     tenant_id = tenant["id"]
+    if status and status not in {"active", "handoff", "closed"}:
+        raise HTTPException(status_code=422, detail="status debe ser active | handoff | closed")
+    kw: dict = {"status": status, "channel": channel, "q": q, "since": since, "before": before,
+                "limit": limit, "tag": tag}
+    if assigned == "me":
+        kw["assigned_to"] = user.get("email")
+    elif assigned == "none":
+        kw["only_unassigned"] = True
+    elif assigned:
+        kw["assigned_to"] = assigned.strip().lower()
     if _is_agent(user):
         # El asesor ve sus conversaciones + las libres (cola por reclamar), no las de otros.
-        convs = db.list_conversations(assigned_to=user.get("email"), include_unassigned=True)
-    else:
-        convs = db.list_conversations()
-    return {"conversations": convs}
+        if kw.get("assigned_to") and kw["assigned_to"] != user.get("email"):
+            raise HTTPException(status_code=403, detail="Solo puedes filtrar por tus conversaciones")
+        if not kw.get("assigned_to") and not kw.get("only_unassigned"):
+            kw["assigned_to"] = user.get("email")
+            kw["include_unassigned"] = True
+    convs = db.list_conversations(**kw)
+    return {"conversations": convs, "count": len(convs),
+            "next_before": convs[-1]["updated_at"] if len(convs) >= limit else None}
 
 
 @router.get("/api/conversations/{conversation_id}")
-def conversation_messages(conversation_id: str,
+def conversation_messages(conversation_id: str, after: str | None = None,
                           user: dict = Depends(auth.require("conversations:read"))):
+    """Hilo completo o, con `after=<created_at>`, solo los mensajes nuevos (append)."""
     tenant = T.get_config()
     tenant_id = tenant["id"]
     conv = db.get_conversation(conversation_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada para este tenant")
     _assert_conversation_access(user, conv)
-    msgs = db.get_messages(conversation_id)
+    msgs = db.get_messages(conversation_id, after=after)
     # Fase 3: datos estructurados del lead (idioma, ruta, monto, KYC…) para el panel.
-    return {"conversation_id": conversation_id, "messages": msgs,
+    return {"conversation_id": conversation_id, "messages": msgs, "partial": bool(after),
             "lead": conv.get("lead_data", {}),
-            "status": conv.get("status"), "assigned_to": conv.get("assigned_to")}
+            "status": conv.get("status"), "assigned_to": conv.get("assigned_to"),
+            "updated_at": conv.get("updated_at"), "connection_id": conv.get("connection_id"),
+            "tags": db.tags_for(conversation_id) if not after else None,
+            "notes": db.list_notes(conversation_id) if not after else None}
 
 
 @router.delete("/api/conversations/{conversation_id}")
@@ -549,7 +680,10 @@ async def media_proxy(provider: str, ref: str,
         raise HTTPException(status_code=422, detail="provider inválido")
     if content is None:
         raise HTTPException(status_code=404, detail="No se pudo obtener el archivo del canal")
-    return Response(content=content, media_type=mime or "application/octet-stream")
+    # Los adjuntos son inmutables por (provider, ref): el navegador puede cachearlos
+    # en privado una hora y el panel no vuelve a descargarlos en cada refresco.
+    return Response(content=content, media_type=mime or "application/octet-stream",
+                    headers={"Cache-Control": "private, max-age=3600"})
 
 
 # ---------- derivación a asesores ----------
@@ -561,8 +695,14 @@ class AssignIn(BaseModel):
 def advisors_list(user: dict = Depends(auth.require("conversations:read"))):
     tenant = T.get_config()
     tenant_id = tenant["id"]
-    return {"advisors": [auth._public_user(u) for u in auth.list_advisors()],
-            "load": db.handoff_load_by_agent()}
+    snap = presence.snapshot()
+    advisors = []
+    for u in auth.list_advisors():
+        pub = auth._public_user(u)
+        pub["presence"] = snap.get(u["email"], {"status": "away", "last_seen": None, "fresh": False})
+        advisors.append(pub)
+    return {"advisors": advisors, "load": db.handoff_load_by_agent(),
+            "presence_required": features.enabled("presence_required"), "presence_ttl_s": presence.ttl_seconds()}
 
 
 @router.post("/api/conversations/{conversation_id}/assign")
@@ -600,8 +740,10 @@ async def _deliver_to_user(tenant: dict, conv: dict, text: str) -> dict:
         r = await telegram.send_message(chat_id, text)
         return {"sent": bool(r.get("ok")), "channel": "telegram"}
     if channel == "whatsapp" and ref.startswith("wa:"):
-        r = await whatsapp.send_text(ref[3:], text)
-        return {"sent": bool(r.get("sent")), "channel": "whatsapp"}
+        # Siempre por el número (conexión) que recibió la conversación; nunca se cambia implícitamente.
+        conn = T.whatsapp_connection_by_id(conv.get("connection_id"), tenant)
+        r = await whatsapp.send_text(ref[3:], text, connection=conn)
+        return {"sent": bool(r.get("sent")), "channel": "whatsapp", "connection_id": (conn or {}).get("id")}
     # webchat u otro: se guarda; el cliente lo verá al refrescar (no hay push).
     return {"sent": False, "channel": channel or "webchat", "reason": "canal sin envío push"}
 
@@ -620,7 +762,7 @@ async def conversation_reply(conversation_id: str, body: ReplyIn,
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
     _assert_conversation_access(user, conv)
-    db.add_message(conversation_id, "assistant", text)
+    db.add_message(conversation_id, "assistant", text, sender="agent", agent_email=user.get("email"))
     # Al responder un asesor, la conversación queda en handoff (bot en pausa).
     if conv.get("status") != "handoff":
         db.set_conversation_status(conversation_id, "handoff")
@@ -663,7 +805,8 @@ async def conversation_send_image(conversation_id: str, body: ImageIn,
         r = await telegram.send_photo(chat_id, url, caption)
         delivery = {"sent": bool(r.get("ok")), "channel": "telegram"}
     elif channel == "whatsapp" and ref.startswith("wa:"):
-        r = await whatsapp.send_image(ref[3:], url, caption)
+        r = await whatsapp.send_image(ref[3:], url, caption,
+                                      connection=T.whatsapp_connection_by_id(conv.get("connection_id"), tenant))
         delivery = {"sent": bool(r.get("sent")), "channel": "whatsapp"}
     else:
         delivery = {"sent": False, "channel": channel or "webchat", "reason": "canal sin envío push"}
@@ -675,7 +818,8 @@ async def conversation_send_image(conversation_id: str, body: ImageIn,
             media = {"provider": "telegram", "kind": mref["kind"], "ref": mref["ref"],
                      "mime": "image/jpeg", "name": None, "caption": caption}
     text = (f"🖼️ {caption}" if caption else "🖼️ Imagen") if media else f"🖼️ {caption or 'Imagen'} — {url}"
-    db.add_message(conversation_id, "assistant", text, media=media)
+    db.add_message(conversation_id, "assistant", text, media=media, sender="agent",
+                   agent_email=user.get("email"))
     if conv.get("status") != "handoff":
         db.set_conversation_status(conversation_id, "handoff")
     if not conv.get("assigned_to"):
@@ -720,7 +864,8 @@ async def conversation_upload(conversation_id: str,
     elif channel == "whatsapp" and ref.startswith("wa:"):
         if not mime.startswith("image/"):
             raise HTTPException(status_code=422, detail="WhatsApp aquí solo acepta imagen (jpeg/png)")
-        r = await whatsapp.send_image_upload(ref[3:], fname, content, mime, cap)
+        r = await whatsapp.send_image_upload(ref[3:], fname, content, mime, cap,
+                                             connection=T.whatsapp_connection_by_id(conv.get("connection_id"), tenant))
         delivery = {"sent": bool(r.get("sent")), "channel": "whatsapp", "detail": r.get("reason") or r.get("detail")}
     else:
         delivery = {"sent": False, "channel": channel or "webchat", "reason": "canal sin envío push"}
@@ -735,7 +880,8 @@ async def conversation_upload(conversation_id: str,
     elif delivery.get("sent") and channel == "whatsapp" and r.get("media_id"):
         media = {"provider": "whatsapp", "kind": "image", "ref": r["media_id"],
                  "mime": mime, "name": fname, "caption": cap}
-    db.add_message(conversation_id, "assistant", f"{label} {cap or fname}", media=media)
+    db.add_message(conversation_id, "assistant", f"{label} {cap or fname}", media=media,
+                   sender="agent", agent_email=user.get("email"))
     if conv.get("status") != "handoff":
         db.set_conversation_status(conversation_id, "handoff")
     if not conv.get("assigned_to"):
@@ -744,6 +890,71 @@ async def conversation_upload(conversation_id: str,
                        f"conversation:{conversation_id}",
                        {"channel": channel, "filename": fname, "mime": mime, "sent": delivery.get("sent")})
     return {"conversation_id": conversation_id, "filename": fname, "delivery": delivery}
+
+
+class NoteIn(BaseModel):
+    text: str
+
+
+@router.get("/api/conversations/{conversation_id}/notes")
+def conversation_notes(conversation_id: str,
+                       user: dict = Depends(auth.require("conversations:read"))):
+    conv = db.get_conversation(conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _assert_conversation_access(user, conv)
+    return {"conversation_id": conversation_id, "notes": db.list_notes(conversation_id)}
+
+
+@router.post("/api/conversations/{conversation_id}/notes")
+def conversation_add_note(conversation_id: str, body: NoteIn,
+                          user: dict = Depends(auth.require("conversations:write"))):
+    """Nota interna del asesor: se guarda en el panel, NUNCA se envía al cliente."""
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Nota vacía")
+    if len(text) > 2000:
+        raise HTTPException(status_code=422, detail="Nota demasiado larga (máx. 2000)")
+    conv = db.get_conversation(conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _assert_conversation_access(user, conv)
+    note = db.add_note(conversation_id, user.get("email"), text)
+    db.add_audit_event(user.get("email"), "conversation.note",
+                       f"conversation:{conversation_id}", {"len": len(text)})
+    return {"conversation_id": conversation_id, "note": note}
+
+
+_DEFAULT_QUICK_REPLIES = [
+    {"key": "saludo", "title": "Saludo", "lang": "es",
+     "text": "¡Hola {nombre}! Soy del equipo Brasper y te acompaño con tu envío. ¿En qué te ayudo?"},
+    {"key": "saudacao", "title": "Saudação", "lang": "pt",
+     "text": "Olá {nombre}! Sou da equipe Brasper e vou te acompanhar no seu envio. Como posso ajudar?"},
+    {"key": "comprobante", "title": "Pedir comprobante", "lang": "es",
+     "text": "Perfecto. Cuando realices el depósito de {monto}, envíame aquí el comprobante y lo validamos al instante."},
+    {"key": "comprovante", "title": "Pedir comprovante", "lang": "pt",
+     "text": "Perfeito. Quando fizer o depósito de {monto}, me envie aqui o comprovante e validamos na hora."},
+    {"key": "tiempo", "title": "Tiempo de llegada", "lang": "es",
+     "text": "Tu envío llega en minutos una vez confirmado el depósito; te aviso aquí mismo cuando esté acreditado."},
+    {"key": "cierre", "title": "Cierre", "lang": "es",
+     "text": "¡Listo {nombre}! Tu envío fue realizado con éxito. Gracias por confiar en Brasper 💙"},
+]
+
+
+@router.get("/api/quick-replies")
+def quick_replies(user: dict = Depends(auth.require("conversations:read"))):
+    """Respuestas rápidas del asesor. Se configuran en tenants.json (`quick_replies`,
+    lista de {key,title,lang,text}); si no hay, se usan las predeterminadas.
+    Variables disponibles: {nombre}, {monto}, {monto_recibir}, {ruta}."""
+    cfg = T.get_config()
+    items = cfg.get("quick_replies") or _DEFAULT_QUICK_REPLIES
+    out = []
+    for i, it in enumerate(items):
+        if not isinstance(it, dict) or not (it.get("text") or "").strip():
+            continue
+        out.append({"key": it.get("key") or f"qr{i}", "title": it.get("title") or f"Respuesta {i + 1}",
+                    "lang": it.get("lang") or "es", "text": it["text"]})
+    return {"quick_replies": out, "variables": ["nombre", "monto", "monto_recibir", "ruta"]}
 
 
 @router.post("/api/conversations/{conversation_id}/status")
@@ -759,11 +970,17 @@ def conversation_status(conversation_id: str, body: StatusIn,
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
     _assert_conversation_access(user, conv)
+    if status == "handoff":
+        # Claim atómico: dos asesores tomando a la vez no provocan conflicto; el segundo recibe 409.
+        if not db.claim_conversation(conversation_id, user.get("email")):
+            owner = (db.get_conversation(conversation_id) or {}).get("assigned_to")
+            raise HTTPException(status_code=409, detail=f"Conversación tomada por {owner}")
+        if conv.get("status") != "handoff":
+            handoff_summary.build(conversation_id, "manual")
     db.set_conversation_status(conversation_id, status)
-    if status == "handoff" and not (db.get_conversation(conversation_id) or {}).get("assigned_to"):
-        db.assign_conversation(conversation_id, user.get("email"))
     if status == "active":
         db.assign_conversation(conversation_id, None)  # devuelto al bot
+        db.merge_lead_data(conversation_id, {"repeat_count": 0})
     db.add_audit_event(user.get("email"), "conversation.status",
                        f"conversation:{conversation_id}", {"status": status})
     return {"conversation_id": conversation_id, "status": status}
@@ -810,11 +1027,218 @@ def ops_dead_letter(limit: int = 100, user: dict = Depends(auth.require("usage:r
     return {"count": jobs.dead_letter_count(), "jobs": jobs.list_dead_letter(limit)}
 
 
+class VitalIn(BaseModel):
+    name: str
+    value: float
+    path: str | None = None
+    rating: str | None = None
+
+
+@router.post("/api/ops/web-vitals")
+def ops_web_vitals(body: VitalIn, user: dict = Depends(auth.current_user)):
+    """El panel reporta Core Web Vitals (LCP, INP, CLS…) para seguir la velocidad real."""
+    if body.name.upper() not in {"LCP", "INP", "CLS", "FCP", "TTFB", "FID"}:
+        raise HTTPException(status_code=422, detail="métrica desconocida")
+    observability.record_web_vital(body.name.upper(), float(body.value), body.path or "", body.rating or "")
+    return {"ok": True}
+
+
 @router.get("/api/ops/usage-daily")
 def ops_usage_daily(user: dict = Depends(auth.require("usage:read"))):
     """Agregación de consumo/costo por día y tenant."""
     tenant_id = T.get_config()["id"]
     return {"daily": db.usage_daily()}
+
+
+# ---------- presencia de asesores ----------
+class PresenceIn(BaseModel):
+    status: str = "available"  # available | busy | away
+
+
+@router.post("/api/presence")
+def presence_heartbeat(body: PresenceIn, user: dict = Depends(auth.current_user)):
+    """Heartbeat del panel (cada ~30 s). Sin heartbeat vigente el asesor cuenta como ausente."""
+    try:
+        return presence.heartbeat(user.get("email"), body.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/api/presence")
+def presence_list(user: dict = Depends(auth.require("conversations:read"))):
+    return {"presence": presence.snapshot(), "ttl_s": presence.ttl_seconds()}
+
+
+# ---------- etiquetas ----------
+class TagIn(BaseModel):
+    tag: str
+
+
+@router.get("/api/tags")
+def tags_all(user: dict = Depends(auth.require("conversations:read"))):
+    return {"tags": db.all_tags()}
+
+
+@router.get("/api/conversations/{conversation_id}/tags")
+def conversation_tags(conversation_id: str, user: dict = Depends(auth.require("conversations:read"))):
+    conv = db.get_conversation(conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _assert_conversation_access(user, conv)
+    return {"conversation_id": conversation_id, "tags": db.tags_for(conversation_id)}
+
+
+@router.post("/api/conversations/{conversation_id}/tags")
+def conversation_add_tag(conversation_id: str, body: TagIn,
+                         user: dict = Depends(auth.require("conversations:write"))):
+    conv = db.get_conversation(conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _assert_conversation_access(user, conv)
+    try:
+        tags = db.add_tag(conversation_id, body.tag, user.get("email"))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.add_audit_event(user.get("email"), "conversation.tag", f"conversation:{conversation_id}", {"tag": body.tag})
+    return {"conversation_id": conversation_id, "tags": tags}
+
+
+@router.delete("/api/conversations/{conversation_id}/tags/{tag}")
+def conversation_remove_tag(conversation_id: str, tag: str,
+                            user: dict = Depends(auth.require("conversations:write"))):
+    conv = db.get_conversation(conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _assert_conversation_access(user, conv)
+    return {"conversation_id": conversation_id, "tags": db.remove_tag(conversation_id, tag)}
+
+
+# ---------- conocimiento, herramientas y conexiones (inventario operativo) ----------
+@router.get("/api/knowledge")
+def knowledge_summary(user: dict = Depends(auth.require("conversations:read"))):
+    """Estado del corpus FAQ (aprobadas vs. borradores). Edición vía repo/PR."""
+    return knowledge.summary()
+
+
+@router.get("/api/tools")
+def tools_inventory(user: dict = Depends(auth.require("usage:read"))):
+    """Contratos de herramientas: entradas, permisos, timeout y disponibilidad real."""
+    return {"tools": tool_contracts.describe(), "features": features.all_flags()}
+
+
+@router.get("/api/whatsapp/connections")
+def whatsapp_connections(user: dict = Depends(auth.require("config:read"))):
+    """Conexiones WhatsApp (varios números) sin secretos: id, modalidad y si están configuradas."""
+    out = []
+    for c in T.whatsapp_connections():
+        out.append({"id": c["id"], "label": c["label"], "mode": c["mode"],
+                    "phone_number_id": c.get("phone_number_id"), "display_phone": c.get("display_phone"),
+                    "configured": bool(c.get("token") and c.get("phone_number_id"))})
+    return {"connections": out, "coex_enabled": features.enabled("coex")}
+
+
+# ---------- documentos públicos (privacidad / términos / eliminación de datos) ----------
+class DocIn(BaseModel):
+    lang: str = "es"
+    title: str
+    body_md: str
+
+
+class PublishIn(BaseModel):
+    lang: str = "es"
+    version: int
+
+
+@router.get("/api/public/documents/{slug}")
+def public_document(slug: str, lang: str = "es"):
+    """Público, sin login: SOLO la versión publicada. Si no hay, 404 con estado."""
+    try:
+        doc = public_docs.get_published(slug, lang)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento en preparación: aún no publicado")
+    return {k: doc.get(k) for k in ("slug", "lang", "version", "title", "body_md", "published_at")}
+
+
+class DeletionIn(BaseModel):
+    contact: str
+    channel: str | None = None
+    detail: str | None = None
+
+
+@router.post("/api/public/data-deletion-request")
+def public_deletion_request(body: DeletionIn, request: Request):
+    """Solicitud pública de eliminación de datos. No ejecuta borrados: queda registrada
+    para verificación de identidad por el equipo (ver panel › Documentos públicos)."""
+    rate_limit.check(request, "deletion_request", limit=5)
+    try:
+        req = public_docs.create_deletion_request(body.contact, body.channel, body.detail)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    observability.event("privacy.deletion_requested", request_id=req.get("id"), channel=body.channel)
+    return {"id": req["id"], "status": req["status"], "received_at": req["created_at"]}
+
+
+@router.get("/api/admin/documents")
+def admin_documents(user: dict = Depends(auth.require("config:read"))):
+    return {"documents": public_docs.overview(), "slugs": list(public_docs.SLUGS), "langs": list(public_docs.LANGS)}
+
+
+@router.get("/api/admin/documents/{slug}")
+def admin_document(slug: str, lang: str = "es", user: dict = Depends(auth.require("config:read"))):
+    try:
+        latest = public_docs.get_latest(slug, lang)
+        return {"latest": latest, "published": public_docs.get_published(slug, lang),
+                "history": public_docs.history(slug, lang)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.put("/api/admin/documents/{slug}")
+def admin_document_save(slug: str, body: DocIn, user: dict = Depends(auth.require("tenants:write"))):
+    """Guarda un borrador (nueva versión). Los borradores NO son públicos."""
+    try:
+        doc = public_docs.save_draft(slug, body.lang, body.title, body.body_md, user.get("email"))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.add_audit_event(user.get("email"), "document.draft", f"document:{slug}:{body.lang}", {"version": doc.get("version")})
+    return {"document": doc}
+
+
+@router.post("/api/admin/documents/{slug}/publish")
+def admin_document_publish(slug: str, body: PublishIn, user: dict = Depends(auth.require("tenants:write"))):
+    try:
+        doc = public_docs.publish(slug, body.lang, body.version, user.get("email"))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.add_audit_event(user.get("email"), "document.publish", f"document:{slug}:{body.lang}", {"version": body.version})
+    return {"document": doc}
+
+
+class DeletionStatusIn(BaseModel):
+    status: str
+    note: str | None = None
+
+
+@router.get("/api/admin/deletion-requests")
+def admin_deletion_requests(user: dict = Depends(auth.require("tenants:write"))):
+    return {"requests": public_docs.list_deletion_requests()}
+
+
+@router.post("/api/admin/deletion-requests/{req_id}/status")
+def admin_deletion_status(req_id: int, body: DeletionStatusIn, user: dict = Depends(auth.require("tenants:write"))):
+    try:
+        req = public_docs.set_deletion_status(req_id, body.status, user.get("email"), body.note)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.add_audit_event(user.get("email"), "privacy.deletion_status", f"deletion_request:{req_id}",
+                       {"status": body.status})
+    return {"request": req}
 
 
 # ---------- auth / panel interno ----------

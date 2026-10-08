@@ -275,3 +275,55 @@ docker compose logs worker | grep "backup creado"
 ```
 
 Recomendación: copiar `backend/backups/` a almacenamiento externo fuera del host (el volumen local no protege ante pérdida del servidor).
+
+
+---
+
+## 9. Atención autónoma: flags, revisión semanal y reversión
+
+### 9.1 Flags de despliegue gradual
+
+Las capacidades del bot se activan por flag en `tenants.json → tenants.brasper.features`
+(Admin API `PATCH /api/admin/tenants` con deep-merge; sin redesplegar). Valores por defecto en
+`core/features.py`. Para revertir una capacidad ante un fallo: poner la flag en `false` y
+verificar en el panel › Conocimiento (tarjetas "Flags").
+
+| Flag | Qué apaga si va a `false` |
+|---|---|
+| `knowledge` | FAQ con fuente; las preguntas informativas vuelven al LLM |
+| `status_intent` | Derivación con resumen ante "¿ya llegó mi envío?" (vuelve al LLM) |
+| `anti_loop` | Límite de repeticiones del bot |
+| `audio_confirmation` | Confirmación de cifras ambiguas en audios |
+| `webhook_dedup` | Deduplicación por id de mensaje (Meta/Telegram) |
+| `presence_required` | Asignar solo a asesores con heartbeat `available` |
+| `coex` | Procesar ecos de la app WhatsApp Business (coexistencia) |
+
+### 9.2 Revisión semanal de fallos (piloto)
+
+Cada semana, con `GET /api/ops/metrics` y los eventos estructurados del log:
+
+1. `flows`: conteo, errores y p50/p95 por flujo (`quote`, `info`, `status`, `handoff`, `llm`...).
+2. `knowledge.miss`: preguntas sin respuesta aprobada → candidatas a nuevas entradas (PR a `data/knowledge/brasper/faq.json`).
+3. `conversation.handoff` por `reason`: distribución de motivos de derivación; `no_advisor_available` indica cola sin cobertura.
+4. `bot.repetition`, `audio.ambiguous`, `audio.transcription_failed`, `webhook.duplicate`, `tool.timeout`, `tool.idempotent_replay`.
+5. `web_vitals` p75 (panel) y Lighthouse en CI.
+6. Correr `python tests/evals/run.py`; añadir un escenario por cada fallo real observado (anonimizado).
+
+Meta del piloto: 80 % de resolución autónoma en tareas elegibles (cotizar, FAQ aprobada,
+identificación, cuentas) con cero fallos críticos de permisos, duplicación o datos financieros sin
+respaldo. Una respuesta enviada no cuenta como tarea completada.
+
+### 9.3 Documentos públicos y solicitudes de borrado
+
+Las páginas `/privacidad`, `/terminos` y `/eliminacion-de-datos` sirven **solo** versiones publicadas
+(`public_documents`). Borrador → revisión → publicar desde el panel › Documentos públicos
+(rol con `tenants:write`); cada versión queda auditada (`document.draft`, `document.publish`).
+Las solicitudes de eliminación (`deletion_requests`) no borran nada: se verifican y se cierran a
+mano desde el mismo panel. Las URL exactas se registran en la app de Meta solo después de publicar.
+
+### 9.4 Coexistencia WhatsApp (cuando se habilite)
+
+Antes de poner `features.coex=true` y `whatsapp.connections[].mode="coex"`: confirmar en la cuenta de
+Meta el contrato real de `smb_message_echoes`, `history` y `smb_app_state_sync` (ver plan de
+atención autónoma). Los eventos de historial/sincronización nunca disparan respuestas; un eco del
+celular pausa el bot y se guarda como actividad humana (`sender=agent`, `agent_email=whatsapp-app`).
