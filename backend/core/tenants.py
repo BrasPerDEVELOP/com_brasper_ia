@@ -151,7 +151,9 @@ def whatsapp_connection_by_id(connection_id: str | None, cfg: dict | None = None
         for c in conns:
             if c["id"] == connection_id:
                 return c
-    return conns[0] if conns else None
+        # An explicit missing connection must never send from another number.
+        return {"id": connection_id, "unavailable": True}
+    return conns[0] if len(conns) == 1 else None
 
 
 def resolve_by_phone_number_id(phone_number_id: str) -> dict | None:

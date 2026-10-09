@@ -58,7 +58,7 @@ def entries(approved_only: bool = True) -> list[dict]:
     return [e for e in items if (not approved_only or e.get("status") == "approved")]
 
 
-def search(query: str, lang: str = "es") -> dict | None:
+def search(query: str, lang: str = "es", *, allowed_ids: list[str] | None = None) -> dict | None:
     """Mejor entrada aprobada para la consulta o None si no hay evidencia suficiente.
 
     Puntaje: cada palabra clave contenida en la consulta suma 3; cada token compartido
@@ -68,7 +68,8 @@ def search(query: str, lang: str = "es") -> dict | None:
     q_norm = util.normalize_text(query)
     q_tokens = _tokens(query)
     best, best_score = None, 0
-    for e in entries():
+    available = [e for e in entries() if not allowed_ids or e.get("id") in allowed_ids]
+    for e in available:
         score = 0
         for kw in e.get("keywords", []):
             if util.normalize_text(kw) in q_norm:
@@ -81,7 +82,7 @@ def search(query: str, lang: str = "es") -> dict | None:
     if not best or best_score < 3:
         return None
     # Si hay una variante del mismo grupo en el idioma del usuario, preferirla.
-    for e in entries():
+    for e in available:
         if e.get("group") == best.get("group") and e.get("lang") == lang:
             best = e
             break

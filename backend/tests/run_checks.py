@@ -36,6 +36,14 @@ if str(BACKEND_DIR) not in sys.path:
 os.environ["DATABASE_URL"] = ""
 os.environ["REDIS_URL"] = ""
 os.environ["APP_ENV"] = "development"
+# Un .env local de operación (admin de producción, tenants desde DB, debounce, login con
+# código) no debe cambiar el resultado del gate: se neutraliza antes de cargar módulos.
+for _name in ("PANEL_ADMIN_EMAIL", "PANEL_ADMIN_TOKEN", "PANEL_ADMIN_NAME", "PANEL_LOGIN_CODE",
+              "SEED_DEMO_USERS", "TENANTS_SOURCE", "TENANTS_BOOTSTRAP_OVERWRITE",
+              "CHANNEL_DEBOUNCE_SECONDS", "BRASPER_IA_GRANT_KEY",
+              "WHATSAPP_REQUIRE_SIGNATURE", "WHATSAPP_APP_SECRET", "META_APP_SECRET",
+              "BRASPER_IA_SERVICE_USERNAME", "BRASPER_IA_SERVICE_PASSWORD"):
+    os.environ[_name] = ""
 
 _TMP_DIR = Path(tempfile.mkdtemp(prefix="prod_checks_"))
 
@@ -414,9 +422,15 @@ def case_llm_failure_degrades_to_handoff():
 # ---------------------------------------------------------------------------
 def case_redis_runtime_without_redis():
     assert redis_runtime.configured() is False
+    # Sin Redis el lock pasa a la base: exclusión real, liberación por dueño y TTL.
     token = redis_runtime.acquire_lock("test:lock")
-    assert token == "local-no-redis", token
+    assert token and token.startswith("db:"), token
+    assert redis_runtime.acquire_lock("test:lock", wait_seconds=0.1) is None, "segundo dueño bloqueado"
+    redis_runtime.release_lock("test:lock", "db:not-the-owner")
+    assert redis_runtime.acquire_lock("test:lock", wait_seconds=0.1) is None, "solo el dueño libera"
     redis_runtime.release_lock("test:lock", token)
+    again = redis_runtime.acquire_lock("test:lock", ttl_seconds=0, wait_seconds=0.1)
+    assert again and redis_runtime.acquire_lock("test:lock", wait_seconds=0.5), "un lock vencido se recupera"
     assert jobs.enqueue("noop", {"ok": True}) is False
     os.environ["CHANNEL_DEBOUNCE_SECONDS"] = "2"
     os.environ["REDIS_URL"] = "redis://127.0.0.1:1/0"
@@ -1035,7 +1049,7 @@ def case_brasper_api_live_quote():
 
 
 # ---------------------------------------------------------------------------
-# Caso 35: lead nuevo — deteccion + banner de primer envio tras verificar cliente
+# Caso 35: contacto nuevo — el nombre no acredita identidad ni primer envio
 # ---------------------------------------------------------------------------
 def case_new_lead_and_banner():
     saved_find = brasper_api.find_client
@@ -1047,8 +1061,8 @@ def case_new_lead_and_banner():
         out2 = _run(engine.handle_message("lead-nuevo-xyz", "Ana Pérez",
                                           conversation_id=out["conversation_id"]))
         assert out2["new_lead"] is False, out2
-        assert out2.get("banner") and "primer envío" in (out2["banner"]["text"] or "").lower(), out2
-        # El webchat antepone el banner a la respuesta (contrato del panel/web).
+        assert out2.get("banner") is None, "un nombre nuevo no demuestra elegibilidad"
+        assert not db.get_lead_data(out["conversation_id"]).get("brasper_user_id")
         client = _client()
         r = client.post("/api/chat", headers=OWNER,
                         json={"message": "hola", "user_ref": "lead-web-1"})
@@ -1446,9 +1460,13 @@ def case_panel_inbox_v2():
         return b"\x89PNGfake", "image/png"
     telegram.download_file = _fake_dl
     try:
-        r = client.get("/api/media?provider=telegram&ref=abc", headers=OWNER)
-        assert r.status_code == 200 and r.headers.get("cache-control") == "private, max-age=3600", r.headers
+        db.add_message(c1, "user", "Synthetic media", media={"provider": "telegram", "ref": "abc", "kind": "image"})
+        r = client.get(f"/api/media?provider=telegram&ref=abc&conversation_id={c1}", headers=OWNER)
+        assert r.status_code == 200 and r.headers.get("cache-control") == "private, no-store", r.headers
+        assert r.headers.get("content-security-policy") == "sandbox"
         assert r.headers["content-type"].startswith("image/png")
+        assert client.get(f"/api/media?provider=telegram&ref=abc&conversation_id={c1}", headers=AGENT).status_code == 403
+        assert client.get(f"/api/media?provider=telegram&ref=abc&conversation_id={c2}", headers=OWNER).status_code == 404
     finally:
         telegram.download_file = old_dl
 
@@ -1525,7 +1543,7 @@ def case_status_intent_handoff_with_summary():
     assert h and h["reason"] == "status_lookup_unavailable" and "Pendiente" in h["text"], h
     # El contrato documenta la ausencia de API de estado.
     tools = {t["name"]: t for t in tool_contracts.describe()}
-    assert tools["status.lookup"]["available"] is False
+    assert tools["status.lookup"]["available"] is True  # endpoint exists; rollout flag remains off
     out_pt = _run(engine.handle_message("st-2", "meu envio já chegou?"))
     # Frase corta: la deteccion de idioma puede caer en es; lo relevante es la derivacion honesta.
     assert out_pt["handoff"] is True and ("assessor" in out_pt["response"].lower() or "asesor" in out_pt["response"].lower()), out_pt
@@ -1775,7 +1793,7 @@ def case_tool_contracts_idempotency():
     assert "faltan" in tool_contracts.validate("quote.compute", {"origin": "PEN"})
     assert "no permitidas" in tool_contracts.validate("quote.compute", {"origin": "PEN", "destination": "BRL", "x": 1})
     assert "tipo" in tool_contracts.validate("quote.compute", {"origin": "PEN", "destination": "BRL", "amount_send": True}) or "debe ser" in tool_contracts.validate("quote.compute", {"origin": "PEN", "destination": "BRL", "amount_send": True})
-    assert tool_contracts.run("status.lookup", {}, lambda: 1)["error_code"] == "unavailable"
+    assert tool_contracts.run("status.lookup", {}, lambda: 1)["error_code"] == "validation"
     assert tool_contracts.run("quote.compute", {"origin": "PEN"}, lambda **k: 1)["error_code"] == "validation"
     slow = tool_contracts.run("knowledge.search", {"query": "x"}, lambda query, lang="es": _t.sleep(2.6) or None)
     assert slow["error_code"] == "timeout", slow
@@ -1814,7 +1832,361 @@ def case_flow_metrics_and_summary():
     assert handoff_summary.REASON_LABELS["media"]
 
 
+def case_agent_profiles():
+    from core import agent_profiles, agent_graph
+    client = _client()
+    body = {"profile": {"name": "Luna", "tone": "warm", "emoji": "none", "channels": ["telegram"]}, "expected_version": 0}
+    path = "/api/admin/agent-profiles/luna"
+    assert client.put(path, json=body, headers=AGENT).status_code == 403
+    assert client.put(path, json=body, headers=OWNER).status_code == 200
+    assert client.put(path, json=body, headers=OWNER).status_code == 409
+    invalid = {**body, "profile": {**body["profile"], "discount": 25}}
+    assert client.put(path, json=invalid, headers=OWNER).status_code == 422
+    cid = db.get_or_create_conversation("profile-telegram", "telegram")
+    state = {"cid": cid, "channel": "telegram", "analysis": {"language": "pt"}}
+    assert "Luna" not in agent_graph.build_messages(state)["system_prompt"]  # draft cannot leak
+    assert client.post(path + "/publish", json={"version": 1}, headers=OWNER).status_code == 200
+    prompt = agent_graph.build_messages(state)["system_prompt"]
+    assert "Luna" in prompt and "No uses emojis" in prompt and "portugues" in prompt
+    other = db.get_or_create_conversation("profile-whatsapp", "whatsapp")
+    assert agent_profiles.resolve(other, "whatsapp") is None
+    changed = {"profile": {**body["profile"], "name": "Sol"}, "expected_version": 1}
+    assert client.put(path, json=changed, headers=OWNER).status_code == 200
+    assert client.post(path + "/publish", json={"version": 2}, headers=OWNER).status_code == 200
+    assert "Luna" in agent_graph.build_messages(state)["system_prompt"]  # ongoing conversation remains coherent
+    new = db.get_or_create_conversation("profile-new", "telegram")
+    assert agent_profiles.resolve(new, "telegram")["profile"]["name"] == "Sol"
+    assert client.post(path + "/disable", headers=OWNER).status_code == 200
+    assert agent_profiles.resolve(db.get_or_create_conversation("profile-disabled", "telegram"), "telegram") is None
+    assert len(client.get(path + "/history", headers=OWNER).json()["versions"]) == 2
+    restricted = {"profile": {"name": "Soporte", "capabilities": ["info"], "channels": ["webchat"],
+                               "knowledge_ids": ["documentos"], "priority": 100}, "expected_version": 0}
+    restricted_path = "/api/admin/agent-profiles/support"
+    assert client.put(restricted_path, json=restricted, headers=OWNER).status_code == 200
+    assert client.post(restricted_path + "/publish", json={"version": 1}, headers=OWNER).status_code == 200
+    out = _run(engine.handle_message("restricted-profile", "Cotizar 500 PEN a BRL"))
+    assert out["handoff"] is True and not db.get_lead_data(out["conversation_id"]).get("monto_recibir"), out
+    from core import knowledge
+    assert knowledge.search("documentos necesarios", "es", allowed_ids=["missing"]) is None
+    hit = knowledge.search("documentos necesarios", "pt", allowed_ids=["documentos"])
+    assert hit and hit["entry"]["id"] == "documentos"  # translation must not escape the allowed set
+    client.post(restricted_path + "/disable", headers=OWNER)
+
+
+def case_handoff_interrupts_onboarding():
+    cid = db.get_or_create_conversation("onboarding-human", "webchat")
+    db.merge_lead_data(cid, {"commercial_stage": "collecting_identity", "onboarding_field": "document_number"})
+    out = _run(engine.handle_message("onboarding-human", "quiero hablar con un asesor", conversation_id=cid))
+    assert out["handoff"] and db.conversation_status(cid) == "handoff", out
+    assert not db.get_lead_data(cid).get("numero_documento")
+
+
+def case_real_timeout_and_concurrent_write():
+    import threading
+    import time
+    from dataclasses import replace
+    from core import tool_contracts, idempotency
+    original = tool_contracts.REGISTRY["client.upsert"]
+    tool_contracts.REGISTRY["client.upsert"] = replace(original, timeout=0.08)
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    calls = []
+    key = idempotency.make_key("concurrent-write", "verified-client")
+
+    def slow(lead):
+        calls.append(lead)
+        entered.set()
+        release.wait(2)
+        finished.set()
+        return {"ok": True, "data": {"id": "same-client"}}
+
+    try:
+        start = time.monotonic()
+        result = tool_contracts.run("client.upsert", {"lead": {}}, slow, idempotency_key=key)
+        assert entered.is_set() and result["error_code"] == "timeout", result
+        assert time.monotonic() - start < 0.6  # must return before the worker is released
+        retry = tool_contracts.run("client.upsert", {"lead": {}}, slow, idempotency_key=key)
+        assert retry["error_code"] == "in_progress" and len(calls) == 1, retry
+        release.set()
+        assert finished.wait(1)
+        deadline = time.monotonic() + 1
+        while idempotency.recall(key) is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        replay = tool_contracts.run("client.upsert", {"lead": {}}, slow, idempotency_key=key)
+        assert replay["ok"] and replay["replayed"] and len(calls) == 1, replay
+        # A second simultaneous caller sees the atomic reservation before the first returns.
+        key2 = idempotency.make_key("parallel-write", "verified-client")
+        results = []
+        gate = threading.Barrier(3)
+        def caller():
+            gate.wait()
+            results.append(tool_contracts.run("client.upsert", {"lead": {}},
+                           lambda lead: time.sleep(0.02) or {"ok": True}, idempotency_key=key2))
+        threads = [threading.Thread(target=caller) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        gate.wait()
+        for thread in threads:
+            thread.join(2)
+        assert len(results) == 2 and any(r.get("ok") for r in results), results
+        assert any(r.get("replayed") or r.get("error_code") == "in_progress" for r in results), results
+    finally:
+        release.set()
+        tool_contracts.REGISTRY["client.upsert"] = original
+
+
+def case_coupon_limits_and_selection():
+    import copy
+    coupon = {"code": "VALID", "discount_percentage": 25, "is_active": True,
+              "lifecycle_status": "ACTIVE", "max_uses": 10, "used_count": 1,
+              "origin_currency": "PEN", "destination_currency": "BRL"}
+    original = brasper_api._fetch
+    rows = [coupon]
+    urls = []
+    brasper_api._fetch = lambda url: urls.append(url) or rows
+    try:
+        assert brasper_api.best_coupon({}, "PEN", "BRL")["code"] == "VALID"
+        assert urls[-1].endswith("/transactions/coupons/automatic")
+        invalids = [
+            {"lifecycle_status": "DRAFT"}, {"used_count": 10}, {"is_active": False},
+            {"per_user_limit": 1}, {"discount_percentage": -1}, {"discount_percentage": 101},
+            {"discount_percentage": float("nan")}, {"discount_percentage": float("inf")},
+            {"start_date": "invalid"}, {"start_date": "2030-01-01T00:00:00+00:00"},
+            {"end_date": "2020-01-01T00:00:00+00:00"}, {"start_date": "2020-01-01"},
+            {"exchange_rate_scopes": ["BRL_USD"]}, {"exchange_rate_scopes": [{}]},
+        ]
+        for changes in invalids:
+            rows = [{**copy.deepcopy(coupon), **changes}]
+            assert brasper_api.best_coupon({}, "PEN", "BRL") is None, changes
+        rows = [{**coupon, "exchange_rate_scopes": ["ALL"]}]
+        assert brasper_api.best_coupon({}, "BRL", "USD")["code"] == "VALID"
+        ranges = [{"min": 0, "max": 10000, "rate": 0.03}]
+        for percentage, savings in [(0, 0), (25, 3.75), (100, 15)]:
+            c = {**coupon, "discount_percentage": percentage}
+            q = quotes._quote_from_gross_send(500, 1.5, ranges, c)
+            assert q["coupon_savings_amount"] == savings and q["commission"] == 15 - savings, q
+            assert q["amount_receive"] == round((500 - 15 + savings) * 1.5, 2), q
+            inverse = quotes._quote_inverse(q["amount_receive"], 1.5, ranges, c)
+            assert abs(inverse["amount_send"] - 500) <= 0.01, inverse
+        for percentage in [-1, 101, float("nan"), float("inf")]:
+            q = quotes._quote_from_gross_send(500, 1.5, ranges, {**coupon, "discount_percentage": percentage})
+            assert q["coupon_code"] is None and q["coupon_savings_amount"] == 0, q
+    finally:
+        brasper_api._fetch = original
+
+
+def case_expired_financial_cache_not_reused():
+    import time
+    import httpx
+    from unittest.mock import patch
+    url = "https://unit-test.invalid/coin/tax-rate"
+    brasper_api._cache[url] = (time.time() - brasper_api._TTL - 1, [{"tax": 100}])
+    try:
+        with patch.object(httpx.Client, "get", side_effect=httpx.ConnectError("test offline")):
+            assert brasper_api._fetch(url) is None, "No reutilizar una tasa/cupon vencido si falla la API"
+    finally:
+        brasper_api._cache.pop(url, None)
+
+
+def case_client_identity_and_history():
+    from uuid import uuid4
+    for ref in ["wa:bsuid-51999111222", "wa:opaque51999111222", "wa:999111222", "wa:551", "wa:521999111222"]:
+        assert lead_onboarding.phone_from_channel("whatsapp", ref) is None, ref
+    assert lead_onboarding.phone_from_channel("telegram", "wa:51999111222") is None
+    assert lead_onboarding.phone_from_channel("whatsapp", "wa:51999111222") == ("+51", "999111222")
+    assert lead_onboarding._parse_phone("+55 1") is None
+    recorded, _ = lead_onboarding._consume("document_number", "12345678")
+    assert recorded["document_recorded"] is True and recorded["document_verified"] is False
+    saved_find, saved_history = brasper_api.find_client, brasper_api.client_history
+    history_calls = []
+    client_id = str(uuid4())
+    try:
+        brasper_api.find_client = lambda *a, **kw: {"ok": True, "data": {
+            "id": client_id, "names": "Otra", "code_phone": "+51", "phone": "999000000"}}
+        assert not lead_onboarding.recognize_by_phone("whatsapp", "wa:51999111222")["found"]
+        # Same-name match must never be requested to bind a web/Telegram identity.
+        def forbidden_lookup(*a, **kw):
+            assert not kw.get("full_name"), "no vincular identidad por nombre"
+            return {"ok": True, "data": None}
+        brasper_api.find_client = forbidden_lookup
+        cid = db.get_or_create_conversation("identity-name-only", "webchat")
+        db.merge_lead_data(cid, {"onboarding_field": "full_name", "commercial_stage": "awaiting_name"})
+        answer = lead_onboarding.process(cid, "Ana Perez", "webchat", "identity-name-only", new_lead=False)
+        assert not answer.get("banner") and not db.get_lead_data(cid).get("brasper_user_id")
+        wa_cid = db.get_or_create_conversation("wa:51999111888", "whatsapp")
+        db.merge_lead_data(wa_cid, {"brasper_user_id": client_id, "identity_source": "channel_phone_match",
+                                  "codigo_telefono": "+51", "telefono": "999111888"})
+        payload = {"completed_transfers": 0, "pending_transfers": 1, "first_transfer_eligible": False}
+        brasper_api.client_history = lambda *a, **kw: history_calls.append(kw) or {"ok": True, "data": payload}
+        result = lead_onboarding.refresh_history(wa_cid, "whatsapp", "wa:51999111888")
+        assert result["history_status"] == "verified" and result["first_transfer_eligible"] is False
+        payload = {"completed_transfers": 0, "pending_transfers": 0, "first_transfer_eligible": True}
+        assert lead_onboarding.refresh_history(wa_cid, "whatsapp", "wa:51999111888")["first_transfer_eligible"] is True
+        payload = {"completed_transfers": 0, "pending_transfers": 3, "first_transfer_eligible": True}
+        assert lead_onboarding.refresh_history(wa_cid, "whatsapp", "wa:51999111888") is None
+        assert db.get_lead_data(wa_cid)["first_transfer_eligible"] is None, "no conservar elegibilidad antigua"
+        before = len(history_calls)
+        assert lead_onboarding.refresh_history(wa_cid, "telegram", "tg:111") is None
+        assert len(history_calls) == before, "telefono auto declarado no permite consultar historial"
+    finally:
+        brasper_api.find_client, brasper_api.client_history = saved_find, saved_history
+
+
+def case_approved_media_library():
+    import io, json
+    from PIL import Image
+    from core import media_library
+    image = io.BytesIO()
+    Image.new("RGB", (2, 2), "white").save(image, format="PNG")
+    content = image.getvalue()
+    client = _client()
+    metadata = {"name": "Primer envio ES", "purpose": "promotion", "language": "es"}
+    path = "/api/admin/media-library/first-send-es"
+    assert client.put(path, headers=AGENT, data={"metadata": json.dumps(metadata)}, files={"file": ("test.png", content, "image/png")}).status_code == 403
+    saved = client.put(path, headers=OWNER, data={"metadata": json.dumps(metadata)}, files={"file": ("test.png", content, "image/png")})
+    assert saved.status_code == 200 and saved.json()["version"] == 1, saved.text
+    assert media_library.approved("first-send-es", "es") is None
+    assert client.get(path + "/1/preview", headers=OWNER).content == content
+    assert client.get(path + "/1/preview").status_code == 401
+    assert client.post(path + "/publish", headers=OWNER, json={"version": 1}).status_code == 200
+    assert media_library.approved("first-send-es", "es") is not None
+    assert media_library.approved("first-send-es", "pt") is None
+    assert media_library.approved("first-send-es", "es", "official_accounts") is None
+    invalid = client.put(path, headers=OWNER, data={"metadata": json.dumps(metadata), "expected_version": 1}, files={"file": ("script.svg", b"<svg><script>alert(1)</script></svg>", "image/png")})
+    assert invalid.status_code == 422
+    stale = client.put(path, headers=OWNER, data={"metadata": json.dumps(metadata)}, files={"file": ("test.png", content, "image/png")})
+    assert stale.status_code == 409
+    quote = {"coupon_id": "campaign-test", "campaign_version": 1, "campaign_rules": {"messages": {
+        "es": {"text": "25% sobre comision", "media_id": "first-send-es"}}}}
+    lead = {"brasper_user_id": "same-client"}
+    banner = media_library.campaign_banner(quote, lead, "es")
+    cid = db.get_or_create_conversation("wa:51999000001", "whatsapp")
+    saved_sender = whatsapp.send_image_upload
+    calls = []
+    async def send(*args, **kwargs):
+        calls.append(kwargs)
+        return {"sent": True}
+    whatsapp.send_image_upload = send
+    try:
+        _run(media_library.deliver(cid, "whatsapp", "51999000001", banner, connection={"id": "second-number"}))
+        _run(media_library.deliver(cid, "whatsapp", "51999000001", banner, connection={"id": "second-number"}))
+        assert len(calls) == 1 and calls[0]["connection"]["id"] == "second-number"
+        assert media_library.campaign_banner(quote, lead, "es") is None
+        quote["campaign_version"] = 2
+        banner2 = media_library.campaign_banner(quote, lead, "es")
+        async def fail(*args, **kwargs):
+            raise TimeoutError("simulated")
+        whatsapp.send_image_upload = fail
+        _run(media_library.deliver(cid, "whatsapp", "51999000001", banner2))
+        assert banner2["text"] == "25% sobre comision", "el texto sigue disponible aunque falle imagen"
+        assert media_library.campaign_banner(quote, lead, "es") is None, "no reenviar automaticamente tras timeout incierto"
+    finally:
+        whatsapp.send_image_upload = saved_sender
+    assert client.post(path + "/disable", headers=OWNER).status_code == 200
+    assert media_library.approved("first-send-es", "es") is None
+
+
+def case_campaign_quote_and_admin_permissions():
+    from uuid import uuid4
+    saved = brasper_api.enabled, brasper_api.personalized_quote, brasper_api._integration_request
+    brasper_api.enabled = lambda tenant: True
+    q = quotes._quote_from_gross_send(500, 1.5, [{"min": 0, "max": 1000, "rate": 0.03}], {"code": "FIRST25", "discount_percentage": 25})
+    q.update({"origin_currency": "PEN", "destination_currency": "BRL", "reserved": False})
+    brasper_api.personalized_quote = lambda *args, **kwargs: {"ok": True, "data": q}
+    try:
+        identity = {"brasper_user_id": str(uuid4()), "codigo_telefono": "+51", "telefono": "999111222"}
+        assert quotes.compute("PEN", "BRL", 500, identity=identity)["coupon_savings_amount"] == 3.75
+        q["amount_receive"] += 100
+        assert quotes.compute("PEN", "BRL", 500, identity=identity).get("error"), "no aceptar cifras incoherentes"
+        brasper_api.personalized_quote = lambda *args, **kwargs: {"ok": False}
+        assert quotes.compute("PEN", "BRL", 500, identity=identity).get("error"), "sin fallback a promo local"
+        calls = []
+        def upstream(*args, **kwargs):
+            calls.append((args, kwargs))
+            return {"ok": True, "data": {"id": str(uuid4()), "version": 1}}
+        brasper_api._integration_request = upstream
+        response = _client().post("/api/admin/campaigns", headers=AGENT, json={"draft": {}})
+        assert response.status_code == 403 and not calls
+        response = _client().post("/api/admin/campaigns", headers=OWNER, json={"draft": {}})
+        assert response.status_code == 200 and calls[0][1]["admin"] is True
+        assert calls[0][1]["json"]["actor"] == "owner@agencia.com"
+    finally:
+        brasper_api.enabled, brasper_api.personalized_quote, brasper_api._integration_request = saved
+
+
+def case_bilingual_onboarding_and_private_status():
+    from unittest.mock import patch
+    from uuid import uuid4
+    from core import policies, operation_status
+    assert policies.detect_language("12345678", fallback="pt") == "pt"
+    assert policies.detect_language("Ana Silva", fallback="pt") == "pt"
+    assert policies.detect_language("responde en español", fallback="pt") == "es"
+    passport, error = lead_onboarding._consume("document_number", "AB123456", "pt", "passport")
+    assert not error and passport["numero_documento"] == "AB123456"
+    assert lead_onboarding._consume("document_number", "abc123456", "pt", "dni")[1]
+    with patch.object(brasper_api, "find_client", return_value={"ok": True, "data": None}), \
+         patch.object(brasper_api, "upsert_client", return_value={"ok": True, "data": {"id": str(uuid4()), "created": True}}), \
+         patch.object(brasper_api, "deposit_accounts", return_value={"ok": True, "data": [{"bank": "Banco", "company": "Brasper", "account": "test-only"}]}):
+        ref = "wa:5511998877665"
+        out = _run(engine.handle_message(ref, "Olá", channel="whatsapp"))
+        cid = out["conversation_id"]
+        assert "nome completo" in out["response"], out
+        for message in ["Ana Silva", "quero enviar 500 PEN para BRL", "continuar", "passaporte", "AB123456"]:
+            out = _run(engine.handle_message(ref, message, channel="whatsapp", conversation_id=cid))
+        assert "contas oficiais" in out["response"] and "verificará o pagamento" in out["response"], out
+        assert db.get_lead_data(cid)["idioma"] == "pt"
+        # Typed identity must not allow private reads on another channel.
+        with patch.object(operation_status.features, "enabled", return_value=True), \
+             patch.object(brasper_api, "operation_status", return_value={"ok": True, "data": {"data": [{"code": "PxB-123", "status": "verification"}]}}) as remote:
+            assert operation_status.lookup(cid, "telegram", ref, "estado", "pt") is None
+            remote.assert_not_called()
+            reply = operation_status.lookup(cid, "whatsapp", ref, "estado PxB-123", "pt")
+            assert "em verificação" in reply and "concluída" not in reply
+            remote.return_value = {"ok": True, "data": {"data": [{"code": "PxB-123", "status": "invented"}]}}
+            assert operation_status.lookup(cid, "whatsapp", ref, "estado", "es") is None
+            remote.return_value = {"ok": False}
+            assert operation_status.lookup(cid, "whatsapp", ref, "estado", "es") is None
+
+
+def case_human_revision_and_document_conflicts():
+    from unittest.mock import patch
+    from concurrent.futures import ThreadPoolExecutor
+    from core import public_docs
+    cid = db.get_or_create_conversation("human-race-test", "webchat")
+    revision = db.get_conversation(cid)["human_revision"]
+    old = {"conversation_id": cid, "human_revision": revision}
+    assert engine.delivery_allowed(old)
+    db.invalidate_ai(cid)
+    db.set_conversation_status(cid, "active")
+    assert not engine.delivery_allowed(old), "resuming cannot revive a stale response"
+    async def interrupted(tenant, messages):
+        db.invalidate_ai(cid)
+        return {"content": "This response must not be sent", "provider": "stub", "model": "stub", "tokens_in": 1, "tokens_out": 1, "cost_usd": 0}
+    with patch.object(llm, "chat", side_effect=interrupted):
+        out = _run(engine.handle_message("human-race-test", "necesito orientación general", conversation_id=cid))
+    assert out["paused"] and not out["response"] and not engine.delivery_allowed(out)
+    latest = public_docs.get_latest("terminos", "pt")
+    version = latest["version"] if latest else 0
+    def save(n):
+        try:
+            return public_docs.save_draft("terminos", "pt", f"Test {n}", "Only synthetic content", "test", version)
+        except public_docs.Conflict:
+            return None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(save, [1, 2]))
+    assert sum(r is not None for r in results) == 1
+    assert public_docs.get_latest("terminos", "pt")["version"] == version + 1
+
+
 def main() -> int:
+    from engagement_checks import run as engagement_checks
+    from channel_checks import run as channel_checks
+    from media_checks import run as media_checks
+    from identity_checks import identity_checks
+    from contact_checks import contact_checks
+    from outbound_checks import outbound_checks
+    from access_checks import access_checks
+    from service_auth_checks import service_auth_checks
+    from lock_checks import lock_checks
     check("1. config single-tenant Brasper (secretos por env, prompt con reglas)", case_config_single_tenant)
     check("2. persistencia + orden cronologico", case_persistence_order)
     check("3. conversacion se reutiliza por usuario/canal; closed abre nueva", case_conversation_reuse)
@@ -1849,7 +2221,7 @@ def main() -> int:
     check("32. Telegram: voz entrante se transcribe y el bot responde", case_telegram_audio_transcription)
     check("33. audio_adapter: seleccion de backend", case_audio_adapter_provider_selection)
     check("34. API Brasper exclusiva: TC real sin fallback local", case_brasper_api_live_quote)
-    check("35. Lead nuevo: deteccion + banner de primer envio", case_new_lead_and_banner)
+    check("35. Contacto nuevo: nombre no acredita identidad ni primer envio", case_new_lead_and_banner)
     check("36. Cotizacion persiste lead estructurado + fila quotes (fee real)", case_lead_data_and_quote_persisted)
     check("37. Reglas: vigencia TC 20min + monto alto deriva a asesor", case_quote_business_rules)
     check("38. Checkout: cuentas oficiales sin crear transaccion", case_checkout_deposit_accounts)
@@ -1871,10 +2243,29 @@ def main() -> int:
     check("54. Documentos publicos: borrador privado, publicacion versionada, solicitud de borrado", case_public_documents_and_deletion)
     check("55. Contratos de herramientas: validacion, timeout, no disponible, idempotencia", case_tool_contracts_idempotency)
     check("56. Metricas por flujo + resumen de derivacion", case_flow_metrics_and_summary)
+    check("57. Perfiles IA: permisos, borradores, versionado, canales y continuidad", case_agent_profiles)
+    check("58. Solicitar asesor interrumpe la recopilacion de identidad", case_handoff_interrupts_onboarding)
+    check("59. Timeout real, escritura concurrente unica y resultado tardio recuperable", case_real_timeout_and_concurrent_write)
+    check("60. Cupones: 0-100 sobre comision, vigencia, limites y par oficial", case_coupon_limits_and_selection)
+    check("61. API caida: cache financiera vencida no se reutiliza", case_expired_financial_cache_not_reused)
+    check("62. Identidad: sin vinculacion por nombre/BSUID; historial oficial y reserva pendiente", case_client_identity_and_history)
+    check("63. Biblioteca aprobada: versiones, idioma, RBAC, envio unico y fallo de imagen", case_approved_media_library)
+    check("64. Campanas: cotizacion oficial sin fallback y administracion separada", case_campaign_quote_and_admin_permissions)
+    check("65. Onboarding PT persistente, documentos y estado privado por identidad", case_bilingual_onboarding_and_private_status)
+    check("66. Intervencion humana invalida respuestas; conflictos de documentos", case_human_revision_and_document_conflicts)
 
     print("=" * 60)
     print("GATE PRODUCCION — verificacion (sin pytest, sin LLM real)")
     print("=" * 60)
+    check("67. Seguimiento: consentimiento, horario, takeover, encuesta y ventana", lambda: engagement_checks(_client(), OWNER, AGENT))
+    check("68. Canales: conexiones aisladas, BSUID, eco propio y humano durante upload", lambda: channel_checks(_client(), _wa_payload))
+    check("69. Medios privados: streaming limitado, tipo de audio y host autorizado", media_checks)
+    check("70. Vinculacion Telegram/webchat: token de un uso, grant cifrado, dueño y timeout", identity_checks)
+    check("71. Contactos/alias por conexion, BSUID sin telefono, conflictos, creacion concurrente y Redis caido", contact_checks)
+    check("72. Salidas enviado/cancelado/incierto/fallido, estados fuera de orden, ecos diferidos y replay Coex", outbound_checks)
+    check("73. Alcance por canal/numero/sector, comprobantes privados y asignacion con permisos", lambda: access_checks(_client(), OWNER))
+    check("74. Cuenta de servicio: JWT + secreto, re-login unico ante 401 del middleware, sin confundir 401 de ruta", service_auth_checks)
+    check("75. Lock comun en base: sin base no se procesa, Redis mixto excluye y lease vencido no entrega", lock_checks)
     failed = 0
     for name, ok, detail in _RESULTS:
         status = "PASS" if ok else "FAIL"

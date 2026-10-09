@@ -2,13 +2,37 @@
 import hashlib
 import hmac
 import os
+import re
+from urllib.parse import urlparse
 
 import httpx
 
 from core import tenants as T
 from .util import env_bool
 
-GRAPH = "https://graph.facebook.com/v21.0"
+GRAPH = "https://graph.facebook.com/" + os.getenv("WHATSAPP_GRAPH_VERSION", "v21.0")
+
+
+def recipient_fields(value: str) -> dict:
+    """Meta BSUID contract reviewed 2026-10-08; never strip an opaque ID."""
+    if re.fullmatch(r"[A-Z]{2}\.(?:ENT\.)?[A-Za-z0-9]{1,128}", value):
+        return {"recipient": value}
+    if re.fullmatch(r"\+?[0-9]{6,15}", value):
+        return {"to": value}
+    raise ValueError("Identificador WhatsApp no válido")
+
+
+def _sent_result(response, connection):
+    ok = response.status_code == 200
+    message_id = None
+    if ok:
+        messages = response.json().get("messages") or []
+        message_id = messages[0].get("id") if messages else None
+        conn = connection if connection is not None else T.whatsapp_connection_by_id(None)
+        from . import channel_receipts
+        channel_receipts.remember((conn or {}).get("id"), message_id)
+    return {"sent": ok, "status": response.status_code, "message_id": message_id,
+            "detail": None if ok else response.text[:200]}
 
 
 def verify_token() -> str:
@@ -44,10 +68,10 @@ def verify_signature(raw_body: bytes, signature_header: str | None) -> bool:
 def _creds(connection: dict | None) -> tuple[str | None, str | None, dict]:
     """(token, phone_number_id, tenant) de la conexión indicada o de la principal."""
     tenant = T.get_config()
-    conn = connection or T.whatsapp_connection_by_id(None, tenant)
+    conn = connection if connection is not None else T.whatsapp_connection_by_id(None, tenant)
     if conn:
         return conn.get("token"), conn.get("phone_number_id"), tenant
-    return T.whatsapp_token(tenant), T.whatsapp_phone_number_id(tenant), tenant
+    return None, None, tenant
 
 
 async def send_text(to: str, text: str, connection: dict | None = None) -> dict:
@@ -57,15 +81,14 @@ async def send_text(to: str, text: str, connection: dict | None = None) -> dict:
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
-        "to": to,
+        **recipient_fields(to),
         "type": "text",
         "text": {"body": text[:4096]},
     }
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(f"{GRAPH}/{pnid}/messages", json=payload,
                               headers={"Authorization": f"Bearer {token}"})
-    ok = r.status_code == 200
-    return {"sent": ok, "status": r.status_code, "detail": None if ok else r.text[:200]}
+    return _sent_result(r, connection)
 
 
 async def upload_media(filename: str, content: bytes, mime: str, connection: dict | None = None) -> dict:
@@ -84,23 +107,23 @@ async def upload_media(filename: str, content: bytes, mime: str, connection: dic
 
 
 async def send_image_upload(to: str, filename: str, content: bytes,
-                            mime: str, caption: str = "", connection: dict | None = None) -> dict:
+                            mime: str, caption: str = "", connection: dict | None = None, delivery_guard=None) -> dict:
     """Sube la imagen y la envía por WhatsApp usando su media_id (sin URL pública)."""
     up = await upload_media(filename, content, mime, connection=connection)
     if not up.get("ok"):
         return {"sent": False, "reason": up.get("detail") or up.get("reason")}
+    if delivery_guard is not None and not delivery_guard():
+        return {"sent": False, "reason": "conversation_changed"}
     token, pnid, _tenant = _creds(connection)
     image: dict = {"id": up["id"]}
     if caption:
         image["caption"] = caption[:1024]
     payload = {"messaging_product": "whatsapp", "recipient_type": "individual",
-               "to": to, "type": "image", "image": image}
+               **recipient_fields(to), "type": "image", "image": image}
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(f"{GRAPH}/{pnid}/messages", json=payload,
                               headers={"Authorization": f"Bearer {token}"})
-    ok = r.status_code == 200
-    return {"sent": ok, "status": r.status_code, "detail": None if ok else r.text[:200],
-            "media_id": up.get("id")}
+    return {**_sent_result(r, connection), "media_id": up.get("id")}
 
 
 async def send_image(to: str, link: str, caption: str = "", connection: dict | None = None) -> dict:
@@ -112,18 +135,17 @@ async def send_image(to: str, link: str, caption: str = "", connection: dict | N
     if caption:
         image["caption"] = caption[:1024]
     payload = {"messaging_product": "whatsapp", "recipient_type": "individual",
-               "to": to, "type": "image", "image": image}
+               **recipient_fields(to), "type": "image", "image": image}
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(f"{GRAPH}/{pnid}/messages", json=payload,
                               headers={"Authorization": f"Bearer {token}"})
-    ok = r.status_code == 200
-    return {"sent": ok, "status": r.status_code, "detail": None if ok else r.text[:200]}
+    return _sent_result(r, connection)
 
 
 _CONTACT_STD_KEYS = {"profile", "wa_id"}
 
 
-def _contact_for(value: dict, wa_from: str | None) -> dict:
+def _contact_for(value: dict, wa_from: str | None, user_id: str | None = None) -> dict:
     """Identidad del remitente según `contacts[]`: nombre de perfil, wa_id y cualquier
     campo adicional que Meta añada (p. ej. identificadores con alcance de negocio o
     username). Los campos extra se conservan tal cual en `identity` para no asumir
@@ -131,11 +153,13 @@ def _contact_for(value: dict, wa_from: str | None) -> dict:
     for c in value.get("contacts", []) or []:
         if not isinstance(c, dict):
             continue
-        if wa_from and c.get("wa_id") and str(c["wa_id"]) != str(wa_from):
+        if not ((wa_from and str(c.get("wa_id")) == str(wa_from)) or
+                (user_id and str(c.get("user_id")) == str(user_id))):
             continue
         profile = c.get("profile") or {}
         extra = {k: v for k, v in c.items() if k not in _CONTACT_STD_KEYS}
-        return {"wa_id": c.get("wa_id"), "profile_name": profile.get("name"), "identity": extra or None}
+        return {"wa_id": c.get("wa_id"), "profile_name": profile.get("name"),
+                "username": profile.get("username"), "identity": extra or None}
     return {"wa_id": wa_from, "profile_name": None, "identity": None}
 
 
@@ -163,15 +187,16 @@ def parse_incoming(body: dict) -> list[dict]:
                 continue
             if field in ("history", "smb_app_state_sync"):
                 out.append({"type": "history" if field == "history" else "state_sync",
-                            "phone_number_id": pnid, "raw_keys": sorted(value.keys())})
+                            "phone_number_id": pnid, "raw_keys": sorted(value.keys()), "raw": value})
                 continue
             for st in value.get("statuses", []) or []:
                 out.append({"type": "status", "phone_number_id": pnid, "id": st.get("id"),
-                            "status": st.get("status"), "recipient": st.get("recipient_id"),
+                            "status": st.get("status"), "recipient": st.get("recipient_id") or st.get("recipient_user_id"),
                             "timestamp": st.get("timestamp")})
             for msg in value.get("messages", []) or []:
-                base = {"phone_number_id": pnid, "from": msg.get("from"), "id": msg.get("id"),
-                        "timestamp": msg.get("timestamp"), "contact": _contact_for(value, msg.get("from"))}
+                base = {"phone_number_id": pnid, "from": msg.get("from") or msg.get("from_user_id"), "id": msg.get("id"),
+                        "user_id": msg.get("from_user_id"), "phone": msg.get("from"),
+                        "timestamp": msg.get("timestamp"), "contact": _contact_for(value, msg.get("from"), msg.get("from_user_id"))}
                 if msg.get("type") == "text":
                     out.append({**base, "type": "text", "text": msg.get("text", {}).get("body", "")})
                 elif msg.get("type") == "audio":
@@ -202,11 +227,14 @@ async def download_media(media_id: str, connection: dict | None = None) -> tuple
             data = meta.json()
             url = data.get("url")
             mime = data.get("mime_type") or "application/octet-stream"
-            if not url:
+            parsed = urlparse(url or "")
+            host = (parsed.hostname or "").lower()
+            if (parsed.scheme != "https" or parsed.username or parsed.password or
+                    not any(host == domain or host.endswith("." + domain)
+                            for domain in ("facebook.com", "fbsbx.com", "fbcdn.net"))):
                 return None, None
-            media = await client.get(url, headers=headers)
-        if media.status_code != 200:
-            return None, None
-        return media.content, mime
-    except httpx.RequestError:
+            from . import media_limits
+            content, _ = await media_limits.download(client, url, headers=headers)
+        return content, mime
+    except (httpx.RequestError, ValueError):
         return None, None

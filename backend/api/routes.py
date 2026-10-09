@@ -102,9 +102,11 @@ async def chat(body: ChatIn, request: Request,
         out = await engine.handle_message(body.user_ref, body.message.strip(),
                                           channel="webchat",
                                           conversation_id=body.conversation_id)
+        from core import media_library
+        await media_library.deliver(out["conversation_id"], "webchat", body.user_ref, out.get("banner"))
         # Lead nuevo: en webchat el banner se antepone al texto de respuesta.
         banner = out.get("banner")
-        if banner and banner.get("text"):
+        if banner and banner.get("text") and not banner.get("campaign"):
             out["response"] = banner["text"] + "\n\n" + (out.get("response") or "")
         return out
     except engine.ConversationBusyError as e:
@@ -136,7 +138,9 @@ async def consulta_webchat(body: WebChatIn, request: Request,
                                           channel="webchat", conversation_id=session_id)
         response = out.get("response") or ""
         banner = out.get("banner")
-        if banner and banner.get("text"):
+        from core import media_library
+        await media_library.deliver(out["conversation_id"], "webchat", session_id, banner)
+        if banner and banner.get("text") and not banner.get("campaign"):
             response = banner["text"] + "\n\n" + response
         return {"response": response, "conversation_id": session_id}
     except engine.ConversationBusyError as e:
@@ -162,11 +166,13 @@ async def _handle_whatsapp_audio(tenant: dict, msg: dict, user_ref: str, conn: d
     en el panel), se confirman cifras ambiguas y, si falla la transcripción, pasa a un
     asesor en vez de perderse. Recibir un audio NO deriva por sí mismo."""
     base = {"tenant": tenant["id"], "from": msg["from"], "resolved": True, "audio": True}
+    cid = db.get_or_create_conversation(user_ref, "whatsapp", connection_id=(conn or {}).get("id"))
     payload = {
         "tenant_id": tenant["id"], "channel": "whatsapp",
         "user_ref": user_ref, "to": msg["from"],
         "media_id": msg.get("media_id"), "mime_type": msg.get("mime_type"),
         "connection_id": (conn or {}).get("id"),
+        "conversation_id": cid,
     }
     if jobs.enqueue("whatsapp.audio", payload):
         return {**base, "queued": True}
@@ -176,16 +182,16 @@ async def _handle_whatsapp_audio(tenant: dict, msg: dict, user_ref: str, conn: d
         return await whatsapp.send_text(msg["from"], text, connection=conn)
 
     try:
-        tr = await audio_adapter.transcribe_whatsapp(tenant, msg.get("media_id"))
+        tr = await audio_adapter.transcribe_whatsapp(tenant, msg.get("media_id"), connection=conn)
     except Exception as e:  # noqa: BLE001 - fallback en línea, no debe romper el webhook
         tr = {"ok": False, "error": str(e)[:120]}
     if not tr.get("ok") or not (tr.get("text") or "").strip():
         out = await audio_flow.unreadable(channel="whatsapp", user_ref=user_ref, media=media, send=_send,
-                                          error=tr.get("error"))
+                                          error=tr.get("error"), conversation_id=cid)
         return {**base, "transcribed": False, "sent": out.get("sent", False), "reason": "audio no transcrito"}
     try:
         out = await audio_flow.process_transcript(channel="whatsapp", user_ref=user_ref, text=tr["text"].strip(),
-                                                  media=media, send=_send)
+                                                  media=media, send=_send, conversation_id=cid)
     except engine.ConversationBusyError as e:
         return {**base, "sent": False, "reason": str(e)}
     if out.get("conversation_id") and conn:
@@ -211,7 +217,7 @@ async def _handle_whatsapp_media(tenant: dict, msg: dict, user_ref: str, conn: d
     (el comprobante NUNCA se confunde con un pago confirmado). Video/sticker y otros
     formatos no derivan: se responde con cortesía y se conservan."""
     kind = msg["type"]
-    cid = db.get_or_create_conversation(user_ref, "whatsapp")
+    cid = db.get_or_create_conversation(user_ref, "whatsapp", connection_id=(conn or {}).get("id"))
     if conn:
         db.set_connection(cid, conn["id"])
     name = msg.get("filename") or ""
@@ -224,13 +230,19 @@ async def _handle_whatsapp_media(tenant: dict, msg: dict, user_ref: str, conn: d
     media = {"provider": "whatsapp", "kind": kind, "ref": msg.get("media_id"),
              "mime": mime, "name": name or None, "caption": caption}
     db.add_message(cid, "user", text, media=media)
+    guard = {"conversation_id": cid, "human_revision": int((db.get_conversation(cid) or {}).get("human_revision", 0))}
     observability.event("message.media_received", tenant_id=tenant["id"], conversation_id=cid, kind=kind, mime=mime)
     is_proof = kind in ("image", "document") and (not mime or mime.startswith(_PROOF_MIMES))
     sent = False
+    pt = db.get_lead_data(cid).get("idioma") == "pt"
+    unsupported_ack = ("Recebi seu arquivo, mas por aqui posso processar apenas imagens ou PDF de comprovantes. Se precisar, peça um atendente." if pt else _UNSUPPORTED_ACK)
+    proof_ack = ("Recebi seu comprovante 📎. Um atendente vai validá-lo no sistema Brasper; a operação só é confirmada depois da verificação do pagamento." if pt else _PROOF_ACK)
     if not is_proof:
         if db.conversation_status(cid) != "handoff":
-            db.add_message(cid, "assistant", _UNSUPPORTED_ACK)
-            r = await whatsapp.send_text(msg["from"], _UNSUPPORTED_ACK, connection=conn)
+            db.add_message(cid, "assistant", unsupported_ack)
+            if not engine.delivery_allowed(guard):
+                return {"resolved": True, "sent": False, "paused": True}
+            r = await whatsapp.send_text(msg["from"], unsupported_ack, connection=conn)
             sent = r.get("sent", False)
         return {"tenant": tenant["id"], "from": msg["from"], "resolved": True,
                 "media": kind, "sent": sent, "ignored": True}
@@ -240,8 +252,10 @@ async def _handle_whatsapp_media(tenant: dict, msg: dict, user_ref: str, conn: d
         db.set_conversation_status(cid, "handoff")
         assigned = auth.derive_to_advisor(cid)
         handoff_summary.build(cid, "media", extra=f"{kind} {name}".strip())
-        db.add_message(cid, "assistant", _PROOF_ACK)
-        r = await whatsapp.send_text(msg["from"], _PROOF_ACK, connection=conn)
+        db.add_message(cid, "assistant", proof_ack)
+        if not engine.delivery_allowed(guard):
+            return {"resolved": True, "sent": False, "paused": True}
+        r = await whatsapp.send_text(msg["from"], proof_ack, connection=conn)
         sent = r.get("sent", False)
         observability.event("conversation.handoff", tenant_id=tenant["id"],
                             conversation_id=cid, reason="media", assigned_to=assigned)
@@ -260,19 +274,16 @@ async def _handle_whatsapp_echo(tenant: dict, msg: dict, conn: dict | None) -> d
         return {**base, "ignored": True}
     if not msg.get("to"):
         return {**base, "ignored": True, "reason": "sin destinatario"}
-    cid = db.get_or_create_conversation(f"wa:{msg['to']}", "whatsapp")
-    db.set_connection(cid, conn["id"])
-    text = (msg.get("text") or "").strip() or f"📱 {msg.get('kind') or 'mensaje'} enviado desde el celular"
-    # Evitar que un eco de un mensaje que YA guardó la API cuente dos veces.
-    last = db.get_messages(cid)[-1:] if text else []
-    if last and last[0].get("role") == "assistant" and (last[0].get("content") or "").strip() == text:
+    from core import channel_receipts
+    if channel_receipts.is_own(conn["id"], msg.get("id")):
         return {**base, "ignored": True, "reason": "eco de la API"}
-    db.add_message(cid, "assistant", text, sender="agent", agent_email="whatsapp-app")
-    if db.conversation_status(cid) != "handoff":
-        db.set_conversation_status(cid, "handoff")
-        handoff_summary.build(cid, "coex_human")
-        observability.event("conversation.handoff", conversation_id=cid, reason="coex_human")
-    db.merge_lead_data(cid, {"last_human_source": "whatsapp-app"})
+    from core import channel_events, coex, outbound
+    # Nuestro envío al mismo destinatario sigue en vuelo: el eco puede ser propio y aún no
+    # conocemos su id. Se difiere y se resuelve al terminar el envío (nunca por igual texto).
+    if outbound.in_flight(conn["id"], str(msg["to"])):
+        channel_events.defer_echo(conn["id"], msg)
+        return {**base, "deferred": True}
+    cid = coex.apply_human_echo(conn["id"], msg)
     return {**base, "conversation_id": cid, "takeover": True}
 
 
@@ -300,11 +311,17 @@ async def webhook_receive(request: Request):
         # Eventos que NUNCA disparan respuestas: entregas e historial/sincronización Coex.
         if kind == "status":
             observability.event("whatsapp.status", status=msg.get("status"), message_id=msg.get("id"))
+            from core import outbound
+            outbound.apply_status((conn or {}).get("id"), msg.get("id"), msg.get("status"))
             results.append({"tenant": tenant["id"], "resolved": True, "status": msg.get("status")})
             continue
         if kind in ("history", "state_sync"):
             observability.event("whatsapp.coex_sync", kind=kind, keys=msg.get("raw_keys"))
-            results.append({"tenant": tenant["id"], "resolved": True, "sync": kind, "ignored": True})
+            # Se conserva íntegro para replay cuando el contrato Meta esté confirmado; no se procesa.
+            from core import channel_events
+            stored = channel_events.record("whatsapp", (conn or {}).get("id"), kind, msg.get("raw") or {})
+            results.append({"tenant": tenant["id"], "resolved": True, "sync": kind, "ignored": True,
+                            "stored": stored})
             continue
         if kind == "echo":
             if features.enabled("webhook_dedup") and idempotency.seen_event("whatsapp", msg.get("id")):
@@ -322,7 +339,11 @@ async def webhook_receive(request: Request):
             results.append({"tenant": tenant["id"], "from": msg.get("from"), "resolved": True,
                             "ignored": True, "kind": msg.get("kind")})
             continue
+        if not msg.get("from"):
+            results.append({"resolved": True, "ignored": True, "reason": "missing_sender_identity"})
+            continue
         user_ref = f"wa:{msg['from']}"
+        cid = db.get_or_create_conversation(user_ref, "whatsapp", connection_id=(conn or {}).get("id"))
         contact = msg.get("contact") or {}
 
         if kind == "audio":
@@ -334,14 +355,14 @@ async def webhook_receive(request: Request):
 
         if debounce.buffer_message(
             tenant["id"], "whatsapp", user_ref, msg["text"],
-            {"to": msg["from"], "connection_id": (conn or {}).get("id")},
+            {"to": msg["from"], "connection_id": (conn or {}).get("id"), "conversation_id": cid},
         ):
             results.append({"tenant": tenant["id"], "from": msg["from"],
                             "resolved": True, "queued": True})
             continue
         try:
             out = await engine.handle_message(user_ref, msg["text"],
-                                              channel="whatsapp")
+                                              channel="whatsapp", conversation_id=cid)
         except engine.ConversationBusyError as e:
             results.append({"tenant": tenant["id"], "from": msg["from"],
                             "resolved": True, "sent": False, "reason": str(e)})
@@ -358,21 +379,36 @@ async def webhook_receive(request: Request):
                                        ("wa_identity", contact.get("identity"))) if v}
             if ident:
                 db.merge_lead_data(cid, ident)
+            # Alias opaco (BSUID) del mismo evento: se vincula al contacto del teléfono que
+            # Meta entrega junto a él; si ya apuntaba a otro contacto queda como conflicto.
+            if msg.get("user_id") and msg.get("user_id") != msg.get("from"):
+                from core import contacts
+                contacts.resolve("whatsapp", (conn or {}).get("id"), str(msg["user_id"]),
+                                 phone_hint=msg.get("phone"))
+        if not engine.delivery_allowed(out):
+            results.append({"resolved": True, "sent": False, "paused": True})
+            continue
         # Lead nuevo: banner de primer envío antes de la respuesta.
         banner = out.get("banner")
-        if banner:
+        if banner and banner.get("campaign"):
+            from core import media_library
+            await media_library.deliver(cid, "whatsapp", msg["from"], banner, connection=conn)
+        elif banner:
             if banner.get("image_url"):
                 await whatsapp.send_image(msg["from"], banner["image_url"], banner.get("text") or "", connection=conn)
             elif banner.get("text"):
                 await whatsapp.send_text(msg["from"], banner["text"], connection=conn)
             if cid:
                 db.add_message(cid, "assistant", banner.get("text") or "🎁 Banner primer envío")
-        if out.get("paused") or not (out.get("response") or "").strip():
+        if not engine.delivery_allowed(out) or not (out.get("response") or "").strip():
             # Un asesor humano atiende esta conversación: el bot no responde.
             results.append({"tenant": tenant["id"], "from": msg["from"],
                             "resolved": True, "sent": False, "paused": True})
             continue
-        send = await whatsapp.send_text(msg["from"], out["response"], connection=conn)
+        from core import outbound
+        send = await outbound.deliver(out, "whatsapp", msg["from"],
+                                      lambda: whatsapp.send_text(msg["from"], out["response"], connection=conn),
+                                      connection_id=(conn or {}).get("id"), text=out["response"])
         results.append({"tenant": tenant["id"], "from": msg["from"],
                         "resolved": True, "sent": send.get("sent", False), "flow": out.get("flow")})
     return {"received": len(results), "results": results}
@@ -575,7 +611,10 @@ def _is_agent(user: dict) -> bool:
 
 
 def _assert_conversation_access(user: dict, conv: dict) -> None:
-    """Un asesor solo opera conversaciones asignadas a él o libres (que reclama)."""
+    """Alcance por canal/número/sector para todos los roles; además un asesor solo opera
+    conversaciones asignadas a él o libres (que reclama)."""
+    from core import access
+    access.assert_conversation(user, conv)
     if _is_agent(user):
         owner = conv.get("assigned_to")
         if owner and owner != user.get("email"):
@@ -615,6 +654,8 @@ def conversations(status: str | None = None, channel: str | None = None,
         if not kw.get("assigned_to") and not kw.get("only_unassigned"):
             kw["assigned_to"] = user.get("email")
             kw["include_unassigned"] = True
+    from core import access
+    kw["scope_where"], kw["scope_args"] = access.sql_filter(user)
     convs = db.list_conversations(**kw)
     return {"conversations": convs, "count": len(convs),
             "next_before": convs[-1]["updated_at"] if len(convs) >= limit else None}
@@ -667,23 +708,46 @@ def conversation_delete(
 
 
 @router.get("/api/media")
-async def media_proxy(provider: str, ref: str,
+async def media_proxy(provider: str, ref: str, conversation_id: str | None = None,
                       user: dict = Depends(auth.require("conversations:read"))):
     """Proxy de descarga de un adjunto entrante (imagen/archivo) para verlo en el
     panel, sin exponer los tokens del canal al navegador."""
     tenant = T.get_config()
+    if provider not in {"telegram", "whatsapp", "library"}:
+        raise HTTPException(422, "provider inválido")
+    if not conversation_id:
+        raise HTTPException(422, "conversation_id es obligatorio")
+    conv = db.get_conversation(conversation_id)
+    if not conv:
+        raise HTTPException(404, "Adjunto no encontrado")
+    _assert_conversation_access(user, conv)
+    matches = [m for m in db.get_messages(conversation_id)
+               if (m.get("media") or {}).get("provider") == provider and (m.get("media") or {}).get("ref") == ref]
+    if not matches:
+        raise HTTPException(404, "Adjunto no encontrado")
+    from core import access
+    if any(access.is_private_media(m) for m in matches):
+        access.assert_private_media(user)
     if provider == "telegram":
         content, mime = await telegram.download_file(ref)
     elif provider == "whatsapp":
-        content, mime = await whatsapp.download_media(ref)
+        content, mime = await whatsapp.download_media(ref, connection=T.whatsapp_connection_by_id(conv.get("connection_id"), tenant))
+    elif provider == "library":
+        import base64
+        from core import media_library
+        try:
+            asset_id, version = ref.rsplit(":", 1)
+            item = media_library.get(asset_id, int(version), include_image=True)
+            content, mime = base64.b64decode(item["image_base64"]), item["mime"]
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(404, "Imagen no encontrada") from exc
     else:
         raise HTTPException(status_code=422, detail="provider inválido")
     if content is None:
         raise HTTPException(status_code=404, detail="No se pudo obtener el archivo del canal")
-    # Los adjuntos son inmutables por (provider, ref): el navegador puede cachearlos
-    # en privado una hora y el panel no vuelve a descargarlos en cada refresco.
     return Response(content=content, media_type=mime or "application/octet-stream",
-                    headers={"Cache-Control": "private, max-age=3600"})
+                    headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+                             "Content-Security-Policy": "sandbox", "Content-Disposition": "inline"})
 
 
 # ---------- derivación a asesores ----------
@@ -711,8 +775,18 @@ def conversation_assign(conversation_id: str, body: AssignIn,
     tenant = T.get_config()
     tenant_id = tenant["id"]
     email = (body.email or "").strip().lower() or None
-    if email and not auth.user_from_email(email):
+    target = auth.user_from_email(email) if email else None
+    if email and not target:
         raise HTTPException(status_code=422, detail=f"Usuario '{email}' no existe en el panel")
+    conv = db.get_conversation(conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    _assert_conversation_access(user, conv)
+    if _is_agent(user) and email != user.get("email") and conv.get("assigned_to") != user.get("email"):
+        raise HTTPException(status_code=403, detail="Un asesor solo puede tomar o soltar sus conversaciones")
+    from core import access
+    if target and not access.conversation_allowed(target, conv):
+        raise HTTPException(status_code=422, detail="El destinatario no tiene alcance sobre esta conversación")
     db.assign_conversation(conversation_id, email)
     db.add_audit_event(user.get("email"), "conversation.assign",
                        f"conversation:{conversation_id}", {"assigned_to": email})
@@ -762,6 +836,7 @@ async def conversation_reply(conversation_id: str, body: ReplyIn,
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
     _assert_conversation_access(user, conv)
+    db.invalidate_ai(conversation_id)
     db.add_message(conversation_id, "assistant", text, sender="agent", agent_email=user.get("email"))
     # Al responder un asesor, la conversación queda en handoff (bot en pausa).
     if conv.get("status") != "handoff":
@@ -794,6 +869,7 @@ async def conversation_send_image(conversation_id: str, body: ImageIn,
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
     _assert_conversation_access(user, conv)
+    db.invalidate_ai(conversation_id)
     caption = (body.caption or "").strip()
     ref = conv.get("user_ref") or ""
     channel = conv.get("channel")
@@ -844,7 +920,8 @@ async def conversation_upload(conversation_id: str,
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
     _assert_conversation_access(user, conv)
-    content = await file.read()
+    db.invalidate_ai(conversation_id)
+    content = await file.read(_MAX_UPLOAD_BYTES + 1)
     if not content:
         raise HTTPException(status_code=422, detail="Archivo vacío")
     if len(content) > _MAX_UPLOAD_BYTES:
@@ -977,7 +1054,12 @@ def conversation_status(conversation_id: str, body: StatusIn,
             raise HTTPException(status_code=409, detail=f"Conversación tomada por {owner}")
         if conv.get("status") != "handoff":
             handoff_summary.build(conversation_id, "manual")
+    db.invalidate_ai(conversation_id, pause=False)
     db.set_conversation_status(conversation_id, status)
+    from core import engagement
+    engagement.cancel(conversation_id)
+    if status == "closed":
+        engagement.schedule(conversation_id, "survey")
     if status == "active":
         db.assign_conversation(conversation_id, None)  # devuelto al bot
         db.merge_lead_data(conversation_id, {"repeat_count": 0})
@@ -1139,6 +1221,7 @@ def whatsapp_connections(user: dict = Depends(auth.require("config:read"))):
 
 # ---------- documentos públicos (privacidad / términos / eliminación de datos) ----------
 class DocIn(BaseModel):
+    expected_version: int = 0
     lang: str = "es"
     title: str
     body_md: str
@@ -1199,7 +1282,9 @@ def admin_document(slug: str, lang: str = "es", user: dict = Depends(auth.requir
 def admin_document_save(slug: str, body: DocIn, user: dict = Depends(auth.require("tenants:write"))):
     """Guarda un borrador (nueva versión). Los borradores NO son públicos."""
     try:
-        doc = public_docs.save_draft(slug, body.lang, body.title, body.body_md, user.get("email"))
+        doc = public_docs.save_draft(slug, body.lang, body.title, body.body_md, user.get("email"), body.expected_version)
+    except public_docs.Conflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     db.add_audit_event(user.get("email"), "document.draft", f"document:{slug}:{body.lang}", {"version": doc.get("version")})

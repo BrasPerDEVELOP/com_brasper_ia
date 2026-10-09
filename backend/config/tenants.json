@@ -33,7 +33,8 @@
         "api": {
           "enabled": true,
           "base_url": "https://apibras.finzeler.com",
-          "integration_secret_env": "BRASPER_IA_SHARED_SECRET"
+          "integration_secret_env": "BRASPER_IA_SHARED_SECRET",
+          "identity_link_url": ""
         },
         "pairs": [["PEN", "BRL"], ["BRL", "PEN"], ["USD", "BRL"], ["BRL", "USD"]],
         "rates": { "PEN->BRL": 1.46, "BRL->PEN": 0.66, "USD->BRL": 5.4, "BRL->USD": 0.18 },

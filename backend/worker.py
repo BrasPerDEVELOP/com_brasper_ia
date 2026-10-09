@@ -61,17 +61,19 @@ async def transcribe_audio_job(payload: dict) -> None:
     async def _send(text: str) -> dict:
         return await whatsapp.send_text(payload["to"], text, connection=conn)
 
-    tr = await audio_adapter.transcribe_whatsapp(tenant, payload["media_id"])
+    cid = payload.get("conversation_id") or db.get_or_create_conversation(
+        payload["user_ref"], "whatsapp", connection_id=payload.get("connection_id"))
+    tr = await audio_adapter.transcribe_whatsapp(tenant, payload["media_id"], connection=conn)
     if not tr.get("ok") or not (tr.get("text") or "").strip():
         if int(payload.get("_attempt") or 0) >= 2:
             # Último intento: conservar la evidencia y derivar en vez de perder el audio.
             await audio_flow.unreadable(channel="whatsapp", user_ref=payload["user_ref"], media=media,
-                                        send=_send, error=tr.get("error"))
+                                        send=_send, error=tr.get("error"), conversation_id=cid)
             return
         raise RuntimeError(f"transcripción de audio falló: {tr.get('error')}")
     # Flujo compartido: evidencia + confirmación de cifras ambiguas + grafo.
     await audio_flow.process_transcript(channel="whatsapp", user_ref=payload["user_ref"],
-                                        text=tr["text"].strip(), media=media, send=_send)
+                                        text=tr["text"].strip(), media=media, send=_send, conversation_id=cid)
 
 
 async def handle_channel_message(payload: dict) -> None:
@@ -88,17 +90,32 @@ async def handle_channel_message(payload: dict) -> None:
     )
     # Bot en pausa (un asesor atiende) o sin texto -> no se envía nada. Sin esto el
     # worker rompía el takeover y mandaba mensajes vacíos al canal.
-    if out.get("paused") or not (out.get("response") or "").strip():
+    if not engine.delivery_allowed(out) or not (out.get("response") or "").strip():
         return
     if channel == "whatsapp":
         # La respuesta sale por la conexión (número) que recibió el mensaje.
         conn_id = payload.get("connection_id") or (db.get_conversation(out["conversation_id"]) or {}).get("connection_id")
-        await whatsapp.send_text(payload["to"], out["response"],
-                                 connection=tenants.whatsapp_connection_by_id(conn_id, tenant))
+        from core import media_library
+        await media_library.deliver(out["conversation_id"], "whatsapp", payload["to"], out.get("banner"),
+                                    connection=tenants.whatsapp_connection_by_id(conn_id, tenant))
+        if not engine.delivery_allowed(out):
+            return
+        connection = tenants.whatsapp_connection_by_id(conn_id, tenant)
+        from core import outbound
+        await outbound.deliver(out, "whatsapp", payload["to"],
+                               lambda: whatsapp.send_text(payload["to"], out["response"], connection=connection),
+                               connection_id=(connection or {}).get("id"), text=out["response"])
         return
     if channel == "telegram":
+        from core import media_library
+        await media_library.deliver(out["conversation_id"], "telegram", payload["chat_id"], out.get("banner"))
+        if not engine.delivery_allowed(out):
+            return
         markup = telegram.build_handoff_markup() if out.get("handoff") else None
-        await telegram.send_message(payload["chat_id"], out["response"], reply_markup=markup)
+        from core import outbound
+        await outbound.deliver(out, "telegram", payload["chat_id"],
+                               lambda: telegram.send_message(payload["chat_id"], out["response"], reply_markup=markup),
+                               text=out["response"])
         return
     print(f"[worker] canal sin envio automatico: {channel}")
 
@@ -180,6 +197,10 @@ def main() -> int:
         try:
             last_backup_at = maybe_backup(last_backup_at)
             last_sched = run_scheduled(last_sched)
+            from core import channel_events, engagement
+            asyncio.run(engagement.dispatch_one())
+            # Ecos diferidos y envíos 'pending' huérfanos tras una caída: humano / incierto.
+            channel_events.sweep_stale_echoes()
         except Exception as e:  # noqa: BLE001
             print(f"[worker] tarea periódica error: {e}")
         try:

@@ -88,23 +88,11 @@ def _filename(mime_type: str) -> str:
 
 
 async def _download_whatsapp_media(tenant: dict, media_id: str) -> tuple[bytes, str]:
-    token = T.whatsapp_token(tenant)
-    if not token:
-        raise RuntimeError(f"Tenant {tenant['id']}: WhatsApp sin token")
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(timeout=45) as client:
-        meta = await client.get(f"{GRAPH}/{media_id}", headers=headers)
-        if meta.status_code != 200:
-            raise RuntimeError(f"Meta media {meta.status_code}: {meta.text[:160]}")
-        data = meta.json()
-        media_url = data.get("url")
-        mime_type = data.get("mime_type") or "audio/ogg"
-        if not media_url:
-            raise RuntimeError("Meta media sin url")
-        audio = await client.get(media_url, headers=headers)
-        if audio.status_code != 200:
-            raise RuntimeError(f"Descarga media {audio.status_code}: {audio.text[:160]}")
-        return audio.content, mime_type
+    from . import whatsapp
+    content, mime = await whatsapp.download_media(media_id)
+    if content is None:
+        raise RuntimeError("No se pudo descargar el audio dentro de los límites permitidos")
+    return content, mime or "audio/ogg"
 
 
 async def _transcribe_whisper_service(tenant: dict, content: bytes, mime_type: str) -> dict:
@@ -157,11 +145,20 @@ async def _transcribe_openai(tenant: dict, content: bytes, mime_type: str) -> di
 
 async def transcribe_bytes(tenant: dict, content: bytes, mime_type: str = "audio/ogg") -> dict:
     """Transcribe bytes de audio con el backend configurado para el tenant."""
+    from . import media_limits
+    if not content or len(content) > media_limits.MAX_BYTES:
+        return {"ok": False, "error": "audio vacío o demasiado grande"}
+    if not (mime_type.startswith("audio/") or mime_type in {"video/mp4", "application/ogg"}):
+        return {"ok": False, "error": "tipo de audio no permitido"}
     if provider(tenant) == "whisper_service":
         return await _transcribe_whisper_service(tenant, content, mime_type)
     return await _transcribe_openai(tenant, content, mime_type)
 
 
-async def transcribe_whatsapp(tenant: dict, media_id: str) -> dict:
-    content, mime_type = await _download_whatsapp_media(tenant, media_id)
+async def transcribe_whatsapp(tenant: dict, media_id: str, connection: dict | None = None) -> dict:
+    if connection is None:
+        content, mime_type = await _download_whatsapp_media(tenant, media_id)
+    else:
+        from . import whatsapp
+        content, mime_type = await whatsapp.download_media(media_id, connection=connection)
     return await transcribe_bytes(tenant, content, mime_type)

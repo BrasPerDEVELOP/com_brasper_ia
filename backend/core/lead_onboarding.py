@@ -10,14 +10,15 @@ from typing import Any
 
 from core import tenants as T
 from . import brasper_api, db, util, idempotency, tool_contracts
+from .onboarding_copy import text as copy
 
 
 _DOC_TYPES = {
     "dni": "dni", "ce": "ce", "carnet extranjeria": "ce",
     "carné extranjería": "ce", "cpf": "cpf", "cnpj": "cnpj",
-    "ruc": "ruc", "pasaporte": "passport", "passport": "passport",
+    "ruc": "ruc", "pasaporte": "passport", "passport": "passport", "passaporte": "passport",
 }
-_SKIP_EMAIL = {"omitir", "no tengo", "sin correo", "saltar", "ninguno", "no"}
+_SKIP_EMAIL = {"omitir", "no tengo", "sin correo", "saltar", "ninguno", "no", "pular", "nao", "nao tenho", "sem email"}
 
 
 def _digits(value: str) -> str:
@@ -27,20 +28,21 @@ def _digits(value: str) -> str:
 def phone_from_channel(channel: str, user_ref: str) -> tuple[str, str] | None:
     if channel != "whatsapp" or not user_ref.startswith("wa:"):
         return None
-    raw = _digits(user_ref[3:])
-    if raw.startswith("51") and len(raw) > 9:
+    raw = user_ref[3:]
+    if not re.fullmatch(r"\+?[0-9]+", raw):
+        return None
+    raw = raw.lstrip("+")
+    if raw.startswith("51") and len(raw) == 11:
         return "+51", raw[2:]
-    if raw.startswith("55") and len(raw) > 10:
+    if raw.startswith("55") and len(raw) in {12, 13}:
         return "+55", raw[2:]
-    return ("+51", raw) if raw else None
+    return None
 
 
 def _parse_phone(text: str) -> tuple[str, str] | None:
     raw = _digits(text)
-    if text.strip().startswith("+") and raw.startswith("55"):
-        return "+55", raw[2:]
-    if text.strip().startswith("+") and raw.startswith("51"):
-        return "+51", raw[2:]
+    if text.strip().startswith("+"):
+        return phone_from_channel("whatsapp", f"wa:{raw}")
     if len(raw) == 9:
         return "+51", raw
     if len(raw) in {10, 11}:
@@ -48,17 +50,8 @@ def _parse_phone(text: str) -> tuple[str, str] | None:
     return None
 
 
-def _next_prompt(stage: str) -> str:
-    prompts = {
-        "full_name": ("¡Buen día! Bienvenido a Brasper Transferencias 🇵🇪🇧🇷✨\n"
-                      "Puedes indicarme tu nombre completo o decirme directamente "
-                      "cuánto deseas enviar."),
-        "document_type": "¿Qué tipo de documento tienes? Puedes responder: DNI, CE, CPF, CNPJ, RUC o pasaporte.",
-        "document_number": "Escribe el número de tu documento, por favor.",
-        "phone": "Compárteme tu teléfono con código de país, por ejemplo +51 999999999 o +55 11999999999.",
-        "email": "Si deseas, escribe tu correo. También puedes responder *omitir*; es opcional.",
-    }
-    return prompts[stage]
+def _next_prompt(stage: str, language: str = "es") -> str:
+    return copy(stage, language)
 
 
 def needs_onboarding(lead: dict, *, new_lead: bool, checkout: bool, text: str) -> bool:
@@ -76,10 +69,13 @@ def _client_updates(client: dict) -> dict[str, Any]:
     return {
         "brasper_user_id": str(client.get("id")),
         "brasper_user_created": False,
+        "is_first_transfer": client.get("is_first_transfer") if isinstance(client.get("is_first_transfer"), bool) else None,
+        "identity_source": "channel_phone_match",
         "nombres": client.get("names"),
         "apellidos": client.get("lastnames"),
         "tipo_documento": client.get("document_type"),
-        "document_verified": bool(client.get("document_verified")),
+        "document_verified": False,
+        "document_recorded": bool(client.get("document_recorded") or client.get("document_verified")),
         "codigo_telefono": client.get("code_phone"),
         "telefono": str(client.get("phone") or ""),
         "commercial_stage": "client_synced",
@@ -100,6 +96,9 @@ def recognize_by_phone(channel: str, user_ref: str) -> dict:
     client = result.get("data")
     if not client:
         return {"ok": True, "found": False, "phone": detected}
+    if (not client.get("id") or str(client.get("phone") or "") != detected[1]
+            or client.get("code_phone") != detected[0]):
+        return {"ok": False, "found": False}
     return {"ok": True, "found": True, "updates": _client_updates(client)}
 
 
@@ -118,7 +117,7 @@ def _initial_stage(lead: dict, channel: str, user_ref: str, *, checkout: bool) -
     required = ("full_name", "document_type", "document_number", "phone")
     mapping = {
         "full_name": "nombres", "document_type": "tipo_documento",
-        "document_number": "document_verified", "phone": "telefono",
+        "document_number": "document_recorded", "phone": "telefono",
     }
     merged = {**lead, **updates}
     stage = next((item for item in required if not merged.get(mapping[item])), "sync")
@@ -126,13 +125,12 @@ def _initial_stage(lead: dict, channel: str, user_ref: str, *, checkout: bool) -
     return stage, updates
 
 
-def _consume(stage: str, text: str) -> tuple[dict, str | None]:
+def _consume(stage: str, text: str, language: str = "es", document_type: str = "") -> tuple[dict, str | None]:
     value = text.strip()
     if stage == "full_name":
         parts = value.split()
         if len(parts) < 2 or any(ch.isdigit() for ch in value):
-            return {}, ("Puedes indicarme tu nombre completo o, si prefieres cotizar primero, "
-                        "dime cuánto deseas enviar y en qué moneda.")
+            return {}, copy("invalid_name", language)
         split_at = max(1, len(parts) // 2)
         return {"nombres": " ".join(parts[:split_at])[:100],
                 "apellidos": " ".join(parts[split_at:])[:100]}, None
@@ -140,28 +138,27 @@ def _consume(stage: str, text: str) -> tuple[dict, str | None]:
         normalized = util.normalize_text(value)
         doc_type = _DOC_TYPES.get(normalized)
         if not doc_type:
-            return {}, "No reconocí el tipo. Responde DNI, CE, CPF, CNPJ, RUC o pasaporte."
+            return {}, copy("invalid_type", language)
         return {"tipo_documento": doc_type}, None
     if stage == "document_number":
-        number = _digits(value)
-        if len(number) < 3 or len(number) > 20:
-            return {}, "El número de documento no parece válido. Revísalo y envíalo nuevamente."
-        return {"numero_documento": number, "document_verified": True}, None
+        number = re.sub(r"[\s.-]", "", value).upper()
+        pattern = r"[A-Z0-9]{3,20}" if document_type in {"passport", "ce"} else r"[0-9]{3,20}"
+        if not re.fullmatch(pattern, number):
+            return {}, copy("invalid_document", language)
+        return {"numero_documento": number, "document_recorded": True,
+                "document_verified": False}, None
     if stage == "phone":
         parsed = _parse_phone(value)
         if not parsed:
-            return {}, "No reconocí el teléfono. Incluye el código de país, por ejemplo +51 o +55."
+            return {}, copy("invalid_phone", language)
         
-        # Guardar en customers
-        phone_str = f"{parsed[0]}{parsed[1]}"
-        cust = db.get_or_create_customer(phone_str)
-        
-        return {"codigo_telefono": parsed[0], "telefono": parsed[1], "customer_id_internal": cust["id"]}, None
+        return {"codigo_telefono": parsed[0], "telefono": parsed[1],
+                "identity_source": "self_reported"}, None
     if stage == "email":
-        if value.lower() in _SKIP_EMAIL:
+        if util.normalize_text(value) in _SKIP_EMAIL:
             return {"correo": None, "correo_procesado": True}, None
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
-            return {}, "El correo no parece válido. Corrígelo o responde *omitir*."
+            return {}, copy("invalid_email", language)
         return {"correo": value.lower()[:255], "correo_procesado": True}, None
     return {}, None
 
@@ -171,6 +168,7 @@ def process(cid: str, text: str, channel: str, user_ref: str,
     tenant = T.get_config()
     tenant_id = tenant["id"]
     lead = db.get_lead_data(cid)
+    language = lead.get("idioma", "es")
     # Una vez iniciada la identificación para pagar, las respuestas siguientes
     # ("DNI", número, teléfono) ya no contienen la palabra "continuar".
     checkout = checkout or lead.get("commercial_stage") == "collecting_identity"
@@ -190,13 +188,12 @@ def process(cid: str, text: str, channel: str, user_ref: str,
         if recognition.get("found"):
             if checkout:
                 return {
-                    "response": "Encontré tu perfil de Brasper ✅. Continuamos con tu envío.",
+                    "response": copy("found", language),
                     "handoff": False, "usage": None, "ready_for_deposit": True,
                 }
-            name = str(lead.get("nombres") or "").split()[0]
+            name = (str(lead.get("nombres") or "").split() or [""])[0]
             return {
-                "response": (f"¡Hola, {name}! Qué gusto atenderte nuevamente en Brasper 😊\n"
-                             "¿Cuánto deseas enviar hoy?"),
+                "response": copy("returning", language, name=name),
                 "handoff": False, "usage": None,
             }
 
@@ -205,10 +202,11 @@ def process(cid: str, text: str, channel: str, user_ref: str,
         stage, updates = _initial_stage(lead, channel, user_ref, checkout=checkout)
         lead = db.merge_lead_data(cid, updates)
         if stage == "identified":
-            return {"response": "¿Cuánto deseas enviar y en qué moneda?", "handoff": False, "usage": None}
-        return {"response": _next_prompt(stage), "handoff": False, "usage": None}
+            return {"response": copy("amount", language), "handoff": False, "usage": None}
+        if stage != "sync":
+            return {"response": _next_prompt(stage, language), "handoff": False, "usage": None}
 
-    updates, error = _consume(stage, text)
+    updates, error = _consume(stage, text, language, lead.get("tipo_documento", ""))
     if error:
         return {"response": error, "handoff": False, "usage": None}
     if updates:
@@ -227,36 +225,30 @@ def process(cid: str, text: str, channel: str, user_ref: str,
             if "numero_documento" in updates:
                 c_updates["document_number"] = updates["numero_documento"]
             if "nombres" in updates or "apellidos" in updates:
-                c_updates["name"] = f"{lead.get('nombres') or ''} {lead.get('apellidos') or ''}".strip()
+                merged = {**lead, **updates}
+                c_updates["name"] = f"{merged.get('nombres') or ''} {merged.get('apellidos') or ''}".strip()
             if c_updates:
                 db.update_customer(conv["customer_id"], c_updates)
                 
         lead = db.merge_lead_data(cid, updates)
 
     if stage == "full_name":
-        full_name = f"{lead.get('nombres') or ''} {lead.get('apellidos') or ''}".strip()
-        found = brasper_api.find_client(tenant, full_name=full_name)
-        if found.get("ok") and found.get("data"):
-            lead = db.merge_lead_data(cid, _client_updates(found["data"]))
-            name = str(lead.get("nombres") or "").split()[0]
-            return {"response": f"¡Mucho gusto, {name}! 🙌 ¿Cuánto deseas enviar?",
-                    "handoff": False, "usage": None}
+        # A name is conversational context, never proof of identity or first transfer.
         db.merge_lead_data(cid, {
-            "client_status": "new" if found.get("ok") else "unverified",
+            "client_status": "unverified",
             "commercial_stage": "identified", "onboarding_field": "identified",
         })
         if not checkout:
             return {
-                "response": (f"¡Mucho gusto, {lead.get('nombres')}! 🙌 "
-                             "Ahora dime cuánto deseas enviar y en qué moneda."),
+                "response": copy("named", language, name=lead.get("nombres") or ""),
                 "handoff": False, "usage": None,
-                "banner": first_send_banner() if found.get("ok") else None,
+                "banner": None,
             }
 
     next_stage, stage_updates = _initial_stage(lead, channel, user_ref, checkout=checkout)
     lead = db.merge_lead_data(cid, stage_updates)
     if next_stage != "sync":
-        return {"response": _next_prompt(next_stage), "handoff": False, "usage": None}
+        return {"response": _next_prompt(next_stage, language), "handoff": False, "usage": None}
 
     # Alta/actualización vía contrato tipado con clave de idempotencia (misma persona =
     # mismo resultado) y verificación tras timeout (consultar antes de repetir la escritura).
@@ -266,35 +258,63 @@ def process(cid: str, text: str, channel: str, user_ref: str,
                              lambda lead: brasper_api.upsert_client(tenant, lead), idempotency_key=idem)
     if run.get("ok"):
         result = run["data"]
-    elif run.get("error_code") == "timeout":
-        found = brasper_api.find_client(tenant, phone=lead.get("telefono"), code_phone=lead.get("codigo_telefono"))
-        if found.get("ok") and found.get("data") and found["data"].get("id") is not None:
-            result = {"ok": True, "data": {"id": found["data"]["id"], "created": False}}
-        else:
-            result = {"ok": False, "error": "timeout"}
     else:
+        # A lookup by phone cannot establish that a timed-out write actually succeeded.
+        # The tool contract keeps the reservation and stores any late result for replay.
         result = {"ok": False, "error": run.get("detail")}
     if not result.get("ok"):
         db.merge_lead_data(cid, {"commercial_stage": "sync_error"})
         return {
-            "response": "Guardé tus datos, pero no pude sincronizarlos con Brasper ahora. Un asesor lo revisará aquí mismo.",
+            "response": copy("sync_error", language),
             "handoff": True, "usage": None,
         }
     data = result["data"]
     db.merge_lead_data(cid, {
         "brasper_user_id": str(data["id"]),
         "brasper_user_created": bool(data.get("created")),
+        "is_first_transfer": data.get("is_first_transfer") if isinstance(data.get("is_first_transfer"), bool) else None,
+        "identity_source": "channel_phone_match" if phone_from_channel(channel, user_ref) ==
+                           (lead.get("codigo_telefono"), lead.get("telefono")) else "self_reported",
         "commercial_stage": "client_synced",
         "onboarding_field": "complete",
         "client_synced_at": util.now_iso(),
     })
-    action = "registrado" if data.get("created") else "encontrado y actualizado"
     return {
-        "response": (f"Listo, tu perfil fue {action} en Brasper ✅. "
-                     + ("Continuamos con tu envío." if checkout else "Ya puedes solicitar tu cotización.")),
+        "response": copy("created" if data.get("created") else "identified", language) + copy("continue" if checkout else "quote", language),
         "handoff": False, "usage": None,
         "ready_for_deposit": checkout,
     }
+
+
+def refresh_history(cid: str, channel: str, user_ref: str) -> dict | None:
+    """Refresh eligibility only for a provider-phone link, never a name/typed phone."""
+    lead = db.get_lead_data(cid)
+    detected = phone_from_channel(channel, user_ref)
+    valid_link = (detected is not None and lead.get("identity_source") == "channel_phone_match"
+                  and detected == (lead.get("codigo_telefono"), str(lead.get("telefono") or ""))
+                  and bool(lead.get("brasper_user_id")))
+    invalid = {"history_status": "identity_unverified", "first_transfer_eligible": None,
+               "completed_transfers": None, "pending_transfers": None, "history_checked_at": None}
+    if not valid_link:
+        db.merge_lead_data(cid, invalid, allow_null=True)
+        return None
+    run = tool_contracts.run("client.history", {
+        "user_id": lead["brasper_user_id"], "code_phone": detected[0], "phone": detected[1],
+    }, lambda **kwargs: brasper_api.client_history(T.get_config(), **kwargs))
+    result = run.get("data") if run.get("ok") else None
+    data = result.get("data") if isinstance(result, dict) and result.get("ok") else None
+    if isinstance(data, dict):
+        completed, pending = data.get("completed_transfers"), data.get("pending_transfers")
+        eligible = data.get("first_transfer_eligible")
+        if (type(completed) is int and completed >= 0 and type(pending) is int and pending >= 0
+                and type(eligible) is bool and eligible == (completed == 0 and pending == 0)):
+            updates = {"history_status": "verified", "completed_transfers": completed,
+                       "pending_transfers": pending, "first_transfer_eligible": eligible,
+                       "history_checked_at": util.now_iso()}
+            db.merge_lead_data(cid, updates)
+            return updates
+    db.merge_lead_data(cid, {**invalid, "history_status": "unavailable"}, allow_null=True)
+    return None
 
 
 def first_send_banner() -> dict | None:
@@ -310,20 +330,20 @@ def first_send_banner() -> dict | None:
 
 
 def deposit_accounts_reply(lead: dict) -> tuple[str, list[dict]]:
+    language = lead.get("idioma", "es")
     tenant = T.get_config()
     tenant_id = tenant["id"]
     route = str(lead.get("ruta") or "")
     currency = route.split("->", 1)[0].upper() if "->" in route else ""
     if not currency:
-        return "Primero necesito una cotización para saber en qué moneda realizarás el depósito.", []
+        return copy("need_quote", language), []
     result = brasper_api.deposit_accounts(tenant, currency)
     accounts = result.get("data") if result.get("ok") else []
     if not accounts:
-        return ("¡Perfecto! 😊 Un asesor se comunicará contigo en unos instantes "
-                "para ayudarte a continuar."), []
-    lines = [f"Estas son las cuentas oficiales de Brasper para depositar en {currency}:"]
+        return copy("accounts_unavailable", language), []
+    lines = [copy("accounts", language, currency=currency)]
     for item in accounts:
         detail = item.get("account") or (f"PIX: {item.get('pix')}" if item.get("pix") else "")
         lines.append(f"• {item.get('bank')} — {item.get('company')} — {detail}")
-    lines.append("Cuando realices el depósito, envía el comprobante por este chat. Un agente comercial verificará el pago y registrará la operación.")
+    lines.append(copy("proof", language))
     return "\n".join(lines), accounts

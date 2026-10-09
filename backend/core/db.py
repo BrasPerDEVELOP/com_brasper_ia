@@ -368,6 +368,26 @@ def init_db() -> None:
     idempotency.ensure_schema()
     presence.ensure_schema()
     public_docs.ensure_schema()
+    from . import agent_profiles
+    agent_profiles.ensure_schema()
+    from . import media_library
+    media_library.ensure_schema()
+    from . import engagement
+    engagement.ensure_schema()
+    from . import channel_receipts
+    channel_receipts.ensure_schema()
+    from . import identity_link
+    identity_link.ensure_schema()
+    from . import db_lock
+    db_lock.ensure_schema()
+    from . import outbound, channel_events
+    outbound.ensure_schema()
+    channel_events.ensure_schema()
+    from . import access
+    access.ensure_schema()
+    from . import contacts
+    contacts.ensure_schema()
+    contacts.backfill()
 
 
 def _ensure_columns() -> None:
@@ -384,7 +404,8 @@ def _ensure_columns() -> None:
                 "ALTER TABLE messages ADD COLUMN sender TEXT",
                 "ALTER TABLE messages ADD COLUMN agent_email TEXT",
                 # Varios números WhatsApp: conexión (phone_number_id) de origen por conversación.
-                "ALTER TABLE conversations ADD COLUMN connection_id TEXT"):
+                "ALTER TABLE conversations ADD COLUMN connection_id TEXT",
+                "ALTER TABLE conversations ADD COLUMN human_revision INTEGER NOT NULL DEFAULT 0"):
         try:
             with connect() as con:
                 con.execute(ddl)
@@ -418,7 +439,7 @@ def _rowdict(row: Any) -> dict:
     return dict(row) if row is not None else {}
 
 
-def get_or_create_conversation(*args, conversation_id: str | None = None) -> str:
+def get_or_create_conversation(*args, conversation_id: str | None = None, connection_id: str | None = None) -> str:
     """Obtiene/crea conversación.
 
     Acepta la firma actual ``(user_ref, channel, conversation_id?)`` y la
@@ -436,26 +457,64 @@ def get_or_create_conversation(*args, conversation_id: str | None = None) -> str
     else:
         raise TypeError("get_or_create_conversation espera 2-4 argumentos")
     tenant_scoped = has_column("conversations", "tenant_id")
+    from . import tenants
+    bind_legacy = bool(connection_id and len(tenants.whatsapp_connections()) == 1)
+    cid = _get_or_create_conversation(tenant_id, user_ref, channel, conversation_id, connection_id,
+                                      tenant_scoped, bind_legacy)
+    try:
+        from . import contacts  # noqa: PLC0415 - contacts importa db
+        provider, external = contacts.split_user_ref(channel, user_ref)
+        if external and has_column("conversations", "contact_id"):
+            contacts.attach(cid, contacts.resolve(provider, connection_id, external))
+    except Exception:  # noqa: BLE001 - el contacto es metadato: nunca bloquea la atención
+        import logging
+        logging.getLogger(__name__).exception("contact resolution failed")
+    return cid
+
+
+def _creation_lock(con, user_ref: str, channel: str, connection_id: str | None) -> None:
+    """Serializa la creación de la conversación abierta de un mismo cliente/canal/conexión:
+    dos webhooks simultáneos no abren dos conversaciones."""
+    if is_postgres():
+        con.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (f"conv:{channel}:{connection_id or ''}:{user_ref}",))
+    elif not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
+
+
+def _get_or_create_conversation(tenant_id, user_ref, channel, conversation_id, connection_id,
+                                tenant_scoped, bind_legacy) -> str:
     with connect() as con:
+        if not conversation_id:
+            _creation_lock(con, user_ref, channel, connection_id)
         if conversation_id:
-            sql = "SELECT id FROM conversations WHERE id=?"
-            params: tuple = (conversation_id,)
+            sql = "SELECT id FROM conversations WHERE id=? AND user_ref=? AND channel=?"
+            params: tuple = (conversation_id, user_ref, channel)
+            if connection_id:
+                sql += " AND connection_id=?"
+                params += (connection_id,)
             if tenant_scoped:
                 sql += " AND tenant_id=?"
                 params += (tenant_id,)
             row = con.execute(sql, params).fetchone()
             if row:
                 return row["id"]
+            if con.execute("SELECT id FROM conversations WHERE id=?", (conversation_id,)).fetchone():
+                raise ValueError("La conversación no corresponde al canal, cliente o conexión")
         # Reutiliza la conversación en curso (activa O en handoff): así los mensajes
         # que llegan mientras un asesor atiende NO abren una conversación nueva ni
         # reactivan al bot. Solo 'closed' inicia una conversación fresca.
         sql = "SELECT id FROM conversations WHERE user_ref=? AND channel=? AND status!='closed'"
         params = (user_ref, channel)
+        if connection_id:
+            sql += " AND (connection_id=? OR connection_id IS NULL)" if bind_legacy else " AND connection_id=?"
+            params += (connection_id,)
         if tenant_scoped:
             sql += " AND tenant_id=?"
             params += (tenant_id,)
         row = con.execute(sql + " ORDER BY updated_at DESC LIMIT ?", params + (1,)).fetchone()
         if row and not conversation_id:
+            if connection_id:
+                con.execute("UPDATE conversations SET connection_id=? WHERE id=? AND connection_id IS NULL", (connection_id, row["id"]))
             return row["id"]
         cid = conversation_id or uuid.uuid4().hex[:12]
         if has_column("conversations", "tenant_id"):
@@ -469,6 +528,8 @@ def get_or_create_conversation(*args, conversation_id: str | None = None) -> str
                 "INSERT INTO conversations "
                 "(id, channel, user_ref, started_at, updated_at) VALUES (?,?,?,?,?)",
                 (cid, channel, user_ref, _now(), _now()))
+        if connection_id:
+            con.execute("UPDATE conversations SET connection_id=? WHERE id=?", (connection_id, cid))
         return cid
 
 
@@ -501,6 +562,9 @@ def add_message(*args, media: dict | None = None, sender: str | None = None,
         con.execute(
             "UPDATE conversations SET updated_at=? WHERE id=?",
             (_now(), conversation_id))
+        if role == "user":
+            con.execute("UPDATE conversations SET human_revision=human_revision+1 WHERE id=?", (conversation_id,))
+            con.execute("UPDATE engagement_jobs SET state='cancelled' WHERE conversation_id=? AND state='pending'", (conversation_id,))
 
 
 def get_history(*args, limit: int = 12) -> list[dict]:
@@ -593,9 +657,10 @@ def get_lead_data(*args) -> dict:
     return conv.get("lead_data", {}) if conv else {}
 
 
-def merge_lead_data(*args) -> dict:
+def merge_lead_data(*args, allow_null: bool = False) -> dict:
     """Fusiona campos del lead (idioma, ruta, monto, KYC…) sin pisar lo ya guardado
-    con valores vacíos. Devuelve el lead_data resultante."""
+    con valores vacíos. allow_null permite invalidar explícitamente un dato
+    anterior cuando su fuente deja de estar disponible."""
     if len(args) == 3:
         tenant_id, conversation_id, updates = args
     elif len(args) == 2:
@@ -606,7 +671,7 @@ def merge_lead_data(*args) -> dict:
         return get_lead_data(tenant_id, conversation_id)
     current = get_lead_data(tenant_id, conversation_id)
     for k, v in updates.items():
-        if v is not None and v != "":
+        if (v is not None and v != "") or (allow_null and v is None):
             current[k] = v
     with connect() as con:
         sql = "UPDATE conversations SET lead_data=?, updated_at=? WHERE id=?"
@@ -649,6 +714,16 @@ def claim_conversation(conversation_id: str, email: str) -> bool:
             "WHERE id=? AND (assigned_to IS NULL OR assigned_to=? )",
             (email, _now(), conversation_id, email))
         return bool(cur.rowcount)
+
+
+def invalidate_ai(conversation_id: str, *, pause: bool = True) -> None:
+    """Persist human intervention before delivery; survives pause/resume and restarts."""
+    with connect() as con:
+        con.execute("UPDATE conversations SET human_revision=human_revision+1, "
+                    + ("status='handoff', " if pause else "")
+                    + "updated_at=? WHERE id=?", (_now(), conversation_id))
+        con.execute("UPDATE engagement_jobs SET state='cancelled' WHERE conversation_id=? AND state='pending'",
+                    (conversation_id,))
 
 
 def set_connection(conversation_id: str, connection_id: str | None) -> None:
@@ -732,7 +807,8 @@ def list_conversations(tenant_id: str = "brasper", limit: int = 50, assigned_to:
                        include_unassigned: bool = False, status: str | None = None,
                        channel: str | None = None, q: str | None = None,
                        since: str | None = None, before: str | None = None,
-                       only_unassigned: bool = False, tag: str | None = None) -> list[dict]:
+                       only_unassigned: bool = False, tag: str | None = None,
+                       scope_where: str = "", scope_args: list | None = None) -> list[dict]:
     """Conversaciones del sistema. Si `assigned_to` se da (vista de asesor), filtra a
     las suyas; con `include_unassigned=True` incluye las libres (la cola por reclamar).
 
@@ -768,6 +844,9 @@ def list_conversations(tenant_id: str = "brasper", limit: int = 50, assigned_to:
     if before:
         where += " AND c.updated_at<?"
         args.append(str(before))
+    if scope_where:  # alcance del usuario (core.access.sql_filter), siempre parametrizado
+        where += scope_where
+        args.extend(scope_args or [])
     if tag:
         where += " AND EXISTS (SELECT 1 FROM conversation_tags t WHERE t.conversation_id=c.id AND t.tag=?)"
         args.append(normalize_tag(tag))
@@ -870,6 +949,8 @@ def get_messages(*args, after: str | None = None) -> list[dict]:
         if raw:
             try:
                 d["media"] = json.loads(raw)
+                if isinstance(d["media"], dict):
+                    d["media"]["conversation_id"] = conversation_id
             except (ValueError, TypeError):
                 d["media"] = None
         out.append(d)

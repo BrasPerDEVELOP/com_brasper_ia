@@ -16,6 +16,9 @@ DEFAULTS: dict[str, bool] = {
     "webhook_dedup": True,        # deduplicación de webhooks por id de mensaje
     "presence_required": False,   # asignar solo a asesores disponibles con heartbeat vigente
     "coex": False,                # ecos de la app WhatsApp Business (coexistencia)
+    "campaigns": False,           # requiere API Brasper con migración 083 y validación previa
+    "operation_status": False,    # consulta privada con identidad verificada; habilitar tras validar API
+    "identity_link": False,       # vinculación Telegram/webchat desde la cuenta Brasper; requiere BRASPER_IA_GRANT_KEY
 }
 
 

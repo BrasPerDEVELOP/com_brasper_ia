@@ -17,6 +17,10 @@ MAX_BODY = 60_000
 _TAG_RE = re.compile(r"<[^>]*>")
 
 
+class Conflict(ValueError):
+    pass
+
+
 def ensure_schema() -> None:
     pk = "id SERIAL PRIMARY KEY" if db.is_postgres() else "id INTEGER PRIMARY KEY AUTOINCREMENT"
     with db.connect() as con:
@@ -30,6 +34,30 @@ def ensure_schema() -> None:
             "detail TEXT, status TEXT NOT NULL DEFAULT 'received', created_at TEXT NOT NULL, "
             "updated_at TEXT NOT NULL, handled_by TEXT, note TEXT)"
         )
+        _renumber_duplicate_versions(con.execute)
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS public_documents_version ON public_documents(slug,lang,version)")
+        con.execute("CREATE TABLE IF NOT EXISTS public_document_heads (slug TEXT NOT NULL, lang TEXT NOT NULL, "
+                    "version INTEGER NOT NULL, PRIMARY KEY(slug,lang))")
+        con.execute("INSERT INTO public_document_heads(slug,lang,version) "
+                    "SELECT slug,lang,MAX(version) FROM public_documents GROUP BY slug,lang "
+                    "ON CONFLICT(slug,lang) DO NOTHING")
+
+
+def _renumber_duplicate_versions(execute) -> int:
+    """Versiones repetidas (slug, lang, version) creadas sin lock antes del índice único:
+    la fila más antigua conserva su número y las demás pasan al final, sin borrar nada."""
+    dups = execute("SELECT slug, lang, version FROM public_documents GROUP BY slug, lang, version "
+                   "HAVING COUNT(*) > 1").fetchall()
+    moved = 0
+    for slug, lang, version in [tuple(r) if not isinstance(r, dict) else (r["slug"], r["lang"], r["version"]) for r in dups]:
+        ids = [r[0] if not isinstance(r, dict) else r["id"] for r in execute(
+            "SELECT id FROM public_documents WHERE slug=? AND lang=? AND version=? ORDER BY id", (slug, lang, version)).fetchall()]
+        for doc_id in ids[1:]:
+            top = execute("SELECT MAX(version) FROM public_documents WHERE slug=? AND lang=?", (slug, lang)).fetchone()
+            nxt = (top[0] if not isinstance(top, dict) else list(top.values())[0]) + 1
+            execute("UPDATE public_documents SET version=? WHERE id=?", (nxt, doc_id))
+            moved += 1
+    return moved
 
 
 def _check(slug: str, lang: str) -> None:
@@ -83,28 +111,40 @@ def history(slug: str, lang: str, limit: int = 20) -> list[dict]:
     return [_row(r) for r in rows]
 
 
-def save_draft(slug: str, lang: str, title: str, body_md: str, author: str | None) -> dict:
+def save_draft(slug: str, lang: str, title: str, body_md: str, author: str | None,
+               expected_version: int | None = None) -> dict:
     _check(slug, lang)
     title = (title or "").strip()[:200]
     body = sanitize(body_md)
     if not title or not body.strip():
         raise ValueError("título y contenido son obligatorios")
     with db.connect() as con:
-        row = con.execute("SELECT COALESCE(MAX(version), 0) AS v FROM public_documents WHERE slug=? AND lang=?",
-                          (slug, lang)).fetchone()
-        version = int(row["v"]) + 1
+        con.execute("INSERT INTO public_document_heads(slug,lang,version) VALUES (?,?,0) "
+                    "ON CONFLICT(slug,lang) DO NOTHING", (slug, lang))
+        query = "UPDATE public_document_heads SET version=version+1 WHERE slug=? AND lang=?"
+        params = (slug, lang)
+        if expected_version is not None:
+            query += " AND version=?"
+            params += (expected_version,)
+        row = con.execute(query + " RETURNING version", params).fetchone()
+        if not row:
+            raise Conflict("El documento cambió; recarga antes de guardar")
+        version = int(row["version"])
         # Un solo borrador vigente: los anteriores quedan 'superseded'.
         con.execute("UPDATE public_documents SET status='superseded' WHERE slug=? AND lang=? AND status='draft'",
                     (slug, lang))
         con.execute(
             "INSERT INTO public_documents (slug, lang, version, title, body_md, status, author, created_at) "
             "VALUES (?,?,?,?,?,?,?,?)", (slug, lang, version, title, body, "draft", author, now_iso()))
-    return get_latest(slug, lang) or {}
+        result = con.execute("SELECT * FROM public_documents WHERE slug=? AND lang=? AND version=?", (slug, lang, version)).fetchone()
+        return _row(result)
 
 
 def publish(slug: str, lang: str, version: int, actor: str | None) -> dict:
     _check(slug, lang)
     with db.connect() as con:
+        # Serialize publication with drafts and other publications on both DBs.
+        con.execute("UPDATE public_document_heads SET version=version WHERE slug=? AND lang=?", (slug, lang))
         row = con.execute("SELECT * FROM public_documents WHERE slug=? AND lang=? AND version=?",
                           (slug, lang, int(version))).fetchone()
         if not row:
@@ -115,7 +155,8 @@ def publish(slug: str, lang: str, version: int, actor: str | None) -> dict:
                     (slug, lang))
         con.execute("UPDATE public_documents SET status='published', published_at=?, published_by=? "
                     "WHERE slug=? AND lang=? AND version=?", (now_iso(), actor, slug, lang, int(version)))
-    return get_published(slug, lang) or {}
+        result = con.execute("SELECT * FROM public_documents WHERE slug=? AND lang=? AND version=?", (slug, lang, int(version))).fetchone()
+        return _row(result)
 
 
 def overview() -> list[dict]:
@@ -144,10 +185,9 @@ def create_deletion_request(contact: str, channel: str | None, detail: str | Non
         raise ValueError("indica un contacto válido (teléfono o correo)")
     now = now_iso()
     with db.connect() as con:
-        con.execute(
+        row = con.execute(
             "INSERT INTO deletion_requests (contact, channel, detail, status, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?)", (contact, (channel or "")[:40], sanitize(detail or "")[:2000], "received", now, now))
-        row = con.execute("SELECT * FROM deletion_requests ORDER BY id DESC LIMIT 1").fetchone()
+            "VALUES (?,?,?,?,?,?) RETURNING *", (contact, (channel or "")[:40], sanitize(detail or "")[:2000], "received", now, now)).fetchone()
     return _row(row)
 
 

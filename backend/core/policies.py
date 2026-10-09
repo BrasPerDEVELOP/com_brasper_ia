@@ -114,7 +114,7 @@ def _tokens(text: str) -> set:
 
 # --- API publica ------------------------------------------------------------
 
-def detect_language(text: str) -> str:
+def detect_language(text: str, fallback: str = "es") -> str:
     """Detecta idioma por marcadores; devuelve 'es' | 'pt' | 'en' (default 'es').
 
     Cuenta coincidencias de tokens distintivos por idioma y elige el maximo;
@@ -127,9 +127,16 @@ def detect_language(text: str) -> str:
     >>> detect_language("")
     'es'
     """
+    fallback = fallback if fallback in {"es", "pt", "en"} else "es"
+    normalized = _normalize_text(text)
+    for pattern, language in [(r"\b(?:en|em|in) (?:portugues|portuguese)\b", "pt"),
+                              (r"\b(?:en|em|in) (?:espanol|espanhol|spanish)\b", "es"),
+                              (r"\b(?:en|em|in) (?:ingles|english)\b", "en")]:
+        if re.search(pattern, normalized):
+            return language
     toks = _tokens(text)
     if not toks:
-        return "es"
+        return fallback
     scores = {
         "pt": len(toks & _PT_MARKERS),
         "en": len(toks & _EN_MARKERS),
@@ -137,7 +144,7 @@ def detect_language(text: str) -> str:
     }
     best = max(scores, key=lambda k: scores[k])
     if scores[best] == 0:
-        return "es"
+        return fallback
     # Desempate estable: si es empata con el ganador, prefiere 'es'.
     if scores["es"] == scores[best]:
         return "es"

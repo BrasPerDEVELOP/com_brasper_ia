@@ -297,6 +297,11 @@ verificar en el panel › Conocimiento (tarjetas "Flags").
 | `webhook_dedup` | Deduplicación por id de mensaje (Meta/Telegram) |
 | `presence_required` | Asignar solo a asesores con heartbeat `available` |
 | `coex` | Procesar ecos de la app WhatsApp Business (coexistencia) |
+| `campaigns` | Cotización de campañas (requiere API con migración 083 validada) |
+| `operation_status` | Consulta privada de estado de envíos (teléfono verificado por WhatsApp o grant de vinculación) |
+| `identity_link` | Vinculación Telegram/webchat desde la cuenta Brasper; además exige `BRASPER_IA_GRANT_KEY` y, en la API, `BRASPER_IA_IDENTITY_LINK_ENABLED=true` |
+
+Las tres últimas vienen en `false`. Activarlas en este orden y solo tras validar la API en un entorno aislado.
 
 ### 9.2 Revisión semanal de fallos (piloto)
 
@@ -327,3 +332,47 @@ Antes de poner `features.coex=true` y `whatsapp.connections[].mode="coex"`: conf
 Meta el contrato real de `smb_message_echoes`, `history` y `smb_app_state_sync` (ver plan de
 atención autónoma). Los eventos de historial/sincronización nunca disparan respuestas; un eco del
 celular pausa el bot y se guarda como actividad humana (`sender=agent`, `agent_email=whatsapp-app`).
+
+### 9.5 Vinculación de chats (Telegram/webchat) y estado privado
+
+1. API: `BRASPER_IA_IDENTITY_LINK_ENABLED=true`. Bot: `BRASPER_IA_GRANT_KEY` (clave Fernet), `features.identity_link=true`,
+   `features.operation_status=true` y `quote.api.identity_link_url` con la URL https del portal (`…/vincular-chat`).
+   Portal: `VITE_TELEGRAM_BOT_USERNAME` para el botón de Telegram.
+2. Recorrido: el cliente pregunta por su envío → el bot deriva y envía el enlace del portal → el cliente inicia sesión
+   y toca «Vincular este chat» → el token (5 min, un uso) vuelve al chat por deep-link `/start` o pegado → grant de 30 min
+   cifrado en `identity_grants`. El token se redacta antes de guardar el mensaje y nunca llega al LLM.
+3. Incidentes: rotar `BRASPER_IA_GRANT_KEY` invalida todos los grants (los clientes vuelven a vincular). El cliente puede
+   retirar sus vínculos desde el portal (`DELETE /brasper/identity-links`). Un timeout del canje no se reintenta.
+
+4. Con `AUTH_REQUIRED=true` en la API, todo `/brasper/ai/*` exige JWT + secreto: definir
+   `BRASPER_IA_SERVICE_USERNAME` / `BRASPER_IA_SERVICE_PASSWORD` (cuenta de servicio dedicada, rotación como cualquier
+   secreto). Sin ellas, la integración privada responde 401 y el bot deriva a asesor (evento
+   `brasper_api.service_auth_failed`).
+
+### 9.6 Alcance por canal, número y sector
+
+Panel › Accesos (o `python manage.py set-scope --email … --channels telegram --connections conn-a --sectors empresas`).
+Vacío = sin restricción. El backend filtra bandeja, detalle, adjuntos, respuestas, asignación y derivación automática.
+Los adjuntos que envía el cliente (comprobantes, documentos, audios) requieren además el permiso `media:private`
+(owner, admin y agent). Un alcance ilegible en la base cierra el acceso en vez de abrirlo.
+
+### 9.7 Salidas inciertas, ecos diferidos y Redis caído
+
+- `outbound_messages`: cada respuesta automática queda `sent`, `cancelled` (intervino un humano antes de enviar),
+  `failed` (4xx) o `uncertain` (timeout/5xx/caída). Las inciertas se ven en la ficha del cliente y **no** se reintentan.
+- Un eco Coex que llega mientras nuestro envío está en vuelo se difiere y se resuelve por id del proveedor; si el
+  envío termina incierto o el proceso cae, el worker lo trata como actividad humana a los 60 s.
+- `history` / `smb_app_state_sync` se guardan en `channel_events` (estado `stored`) para replay cuando el contrato Meta
+  esté confirmado; hoy no se procesan.
+- El lock por conversación vive siempre en `conversation_locks` (Redis se suma si responde). Si la base no responde,
+  el mensaje se rechaza como "ocupado" en vez de procesarse sin exclusión. El lease (45 s) se renueva cada 15 s
+  mientras se procesa; si la renovación falla se cancela el trabajo y no se responde (evento
+  `conversation.lease_lost`).
+
+### 9.8 Contactos
+
+`contacts` + `contact_aliases` (proveedor, conexión, identificador). El mismo teléfono verificado por WhatsApp en dos
+números es un solo contacto; un BSUID sin teléfono es un contacto propio; nunca se vincula por nombre o username. Los
+choques quedan en Panel › Accesos › Contactos por revisar y no se fusionan automáticamente. El backfill de
+conversaciones históricas corre al iniciar y es idempotente.
+

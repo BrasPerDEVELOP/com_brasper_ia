@@ -903,7 +903,7 @@
       }
     },
     {
-      "id": "tool-no-disponible-estado",
+      "id": "tool-estado-rechaza-identidad-ausente",
       "lang": "es",
       "category": "timeout",
       "kind": "tool",
@@ -912,7 +912,7 @@
         "inputs": {}
       },
       "expect": {
-        "error_code": "unavailable",
+        "error_code": "validation",
         "calls": 0
       }
     },
@@ -996,6 +996,67 @@
             ],
             "contains": [
               "Brasper"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "estado-con-referencia-es",
+      "lang": "es",
+      "category": "estado",
+      "steps": [
+        {
+          "user": "¿ya llegó mi envío PxB-1234?",
+          "expect": {
+            "flow": "status",
+            "usage_none": true,
+            "handoff": true,
+            "not_contains": [
+              "cotizar",
+              "1234 PEN"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "estado-con-referencia-pt",
+      "lang": "pt",
+      "category": "estado",
+      "steps": [
+        {
+          "user": "meu envio PxB-77 já chegou?",
+          "expect": {
+            "flow": "status",
+            "usage_none": true,
+            "handoff": true,
+            "not_contains": [
+              "cotar"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "token-vinculacion-sin-capacidad",
+      "lang": "es",
+      "category": "identidad",
+      "channel": "telegram",
+      "user_ref": "tg:5550001",
+      "steps": [
+        {
+          "user": "/start Qk3xTQk3xTQk3xTQk3xTQk3xTQk3xTQk3xTQk3xTabc",
+          "expect": {
+            "flow": "identity_link",
+            "usage_none": true,
+            "handoff": false,
+            "contains": [
+              "asesor"
+            ],
+            "not_contains": [
+              "Qk3xTQk3xTQk3xTQk3xTQk3xTQk3xTQk3xTQk3xTabc",
+              "vinculado a tu cuenta"
             ]
           }
         }

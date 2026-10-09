@@ -204,12 +204,16 @@ async def process_update(body: dict) -> dict:
     except engine.ConversationBusyError:
         return {"handled": False, "busy": True}
     # Lead nuevo: banner de primer envío antes de la respuesta normal.
+    if not engine.delivery_allowed(out):
+        return {"handled": True, "paused": True}
     await _send_banner(chat_id, cid, out.get("banner"))
     # Bot pausado (un asesor atiende) o sin texto -> el bot no responde.
-    if out.get("paused") or not (out.get("response") or "").strip():
+    if not engine.delivery_allowed(out) or not (out.get("response") or "").strip():
         return {"handled": True, "paused": out.get("paused", False)}
     markup = build_handoff_markup() if out.get("handoff") else None
-    await send_message(chat_id, out["response"], reply_markup=markup)
+    from . import outbound
+    await outbound.deliver(out, "telegram", chat_id,
+                           lambda: send_message(chat_id, out["response"], reply_markup=markup), text=out["response"])
     return {"handled": True, "handoff": out.get("handoff", False), "new_lead": out.get("new_lead", False)}
 
 
@@ -217,6 +221,10 @@ async def _send_banner(chat_id, cid: str, banner: dict | None) -> None:
     """Envía el banner de primer envío (imagen + texto o solo texto) y lo registra."""
     tenant = T.get_config()
     if not banner:
+        return
+    if banner.get("campaign"):
+        from . import media_library
+        await media_library.deliver(cid, "telegram", chat_id, banner)
         return
     image_url = banner.get("image_url")
     text = (banner.get("text") or "").strip()
@@ -319,17 +327,15 @@ async def download_file(file_id: str) -> tuple[bytes | None, str | None]:
     if not info.get("ok"):
         return None, None
     file_path = (info.get("result") or {}).get("file_path")
-    if not file_path:
+    if not file_path or file_path.startswith("/") or ".." in file_path.split("/") or "?" in file_path or "#" in file_path:
         return None, None
     url = f"https://api.telegram.org/file/bot{token}/{file_path}"
     try:
         async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.get(url)
-    except httpx.RequestError:
+            from . import media_limits
+            return await media_limits.download(client, url)
+    except (httpx.RequestError, ValueError):
         return None, None
-    if r.status_code != 200:
-        return None, None
-    return r.content, r.headers.get("content-type") or "application/octet-stream"
 
 
 # ---------- admin / diagnóstico ----------

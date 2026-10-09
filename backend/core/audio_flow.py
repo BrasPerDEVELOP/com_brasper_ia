@@ -24,27 +24,39 @@ async def process_transcript(*, channel: str, user_ref: str, text: str, media: d
     """
     text = (text or "").strip()
     cid = db.get_or_create_conversation(user_ref, channel, conversation_id)
+    guard = {"conversation_id": cid, "human_revision": int((db.get_conversation(cid) or {}).get("human_revision", 0))}
     if db.conversation_status(cid) == "handoff":
         # Un asesor atiende: solo se registra la evidencia; el bot no responde.
         db.add_message(cid, "user", f"🎤 {text}" if text else "🎤 Audio", media=media)
         return {"conversation_id": cid, "paused": True, "transcribed": bool(text), "sent": False}
     review = audio_review.review_transcript(text)
     if features.enabled("audio_confirmation") and review["ambiguous"]:
-        lang = policies.detect_language(text) if text else "es"
+        lang = policies.detect_language(text, fallback=db.get_lead_data(cid).get("idioma", "es"))
         db.add_message(cid, "user", f"🎤 {text}" if text else "🎤 Audio (no legible)", media=media)
+        guard["human_revision"] = int((db.get_conversation(cid) or {}).get("human_revision", 0))
         reply = audio_review.confirmation_reply(review, lang)
         db.add_message(cid, "assistant", reply)
         db.merge_lead_data(cid, {"audio_pending_confirmation": review.get("reason")})
         observability.event("audio.ambiguous", conversation_id=cid, reason=review.get("reason"),
                             amounts=review.get("amounts"))
+        if not engine.delivery_allowed(guard):
+            return {"conversation_id": cid, "paused": True, "sent": False}
         r = await send(reply)
         return {"conversation_id": cid, "ambiguous": True, "transcribed": True,
                 "sent": bool(r.get("sent") or r.get("ok"))}
     out = await engine.handle_message(user_ref, text, channel=channel, conversation_id=cid,
                                       user_media={**(media or {}), "caption": text} if media else None)
     db.merge_lead_data(cid, {"audio_pending_confirmation": False})  # merge ignora None: False = resuelto
-    if out.get("paused") or not (out.get("response") or "").strip():
+    if not engine.delivery_allowed(out) or not (out.get("response") or "").strip():
         return {**out, "transcribed": True, "sent": False}
+    if (out.get("banner") or {}).get("campaign"):
+        from . import media_library, tenants
+        conv = db.get_conversation(cid) or {}
+        recipient = user_ref[3:] if channel in {"whatsapp", "telegram"} else user_ref
+        await media_library.deliver(cid, channel, recipient, out["banner"],
+                                    connection=tenants.whatsapp_connection_by_id(conv.get("connection_id")))
+    if not engine.delivery_allowed(out):
+        return {**out, "paused": True, "sent": False}
     r = await send(out["response"])
     return {**out, "transcribed": True, "sent": bool(r.get("sent") or r.get("ok"))}
 
@@ -59,6 +71,7 @@ async def unreadable(*, channel: str, user_ref: str, media: dict | None, send: S
     (el asesor puede reproducirlo en el panel) y la conversación pasa a un asesor."""
     cid = db.get_or_create_conversation(user_ref, channel, conversation_id)
     db.add_message(cid, "user", "🎤 Audio (no transcrito)", media=media)
+    guard = {"conversation_id": cid, "human_revision": int((db.get_conversation(cid) or {}).get("human_revision", 0))}
     db.merge_lead_data(cid, {"audio_state": "transcription_failed"})
     observability.event("audio.transcription_failed", conversation_id=cid, error=(error or "")[:120])
     sent = False
@@ -66,7 +79,11 @@ async def unreadable(*, channel: str, user_ref: str, media: dict | None, send: S
         db.set_conversation_status(cid, "handoff")
         auth.derive_to_advisor(cid)
         handoff_summary.build(cid, "audio_unreadable")
-        db.add_message(cid, "assistant", _UNREADABLE_ACK)
-        r = await send(_UNREADABLE_ACK)
+        reply = ("Recebi seu áudio, mas não consegui entendê-lo com clareza 🎤. Pode escrever em texto? Um atendente também pode ouvi-lo por aqui."
+                 if db.get_lead_data(cid).get("idioma") == "pt" else _UNREADABLE_ACK)
+        db.add_message(cid, "assistant", reply)
+        if not engine.delivery_allowed(guard):
+            return {"conversation_id": cid, "transcribed": False, "sent": False, "handoff": True, "paused": True}
+        r = await send(reply)
         sent = bool(r.get("sent") or r.get("ok"))
     return {"conversation_id": cid, "transcribed": False, "sent": sent, "handoff": True}

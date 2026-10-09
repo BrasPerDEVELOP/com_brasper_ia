@@ -10,6 +10,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import router
+from api.profiles import router as profiles_router
+from api.campaigns import router as campaigns_router
+from api.media_library import router as media_library_router
+from api.engagement import router as engagement_router
+from api.access import router as access_router
 from core import auth, db, llm, tenants, util
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(message)s")
@@ -77,3 +82,8 @@ db.init_db()
 auth.ensure_schema()
 auth.ensure_seed()
 app.include_router(router)
+app.include_router(profiles_router)
+app.include_router(campaigns_router)
+app.include_router(media_library_router)
+app.include_router(engagement_router)
+app.include_router(access_router)

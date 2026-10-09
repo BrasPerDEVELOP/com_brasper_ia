@@ -4,12 +4,12 @@ Permite cotizar con el TIPO DE CAMBIO EN VIVO del día — lo que hoy los asesor
 escriben a mano en cada chat. Endpoints (GET, públicos):
   /coin/tax-rate           -> tasas por par (coin_a, coin_b, tax)
   /coin/commission         -> comisiones por rango (percentage, min/max_amount)
-  /transactions/coupons/   -> cupones activos
+  /transactions/coupons/automatic -> cupones públicos vigentes
 
 Diseño:
   - Caché en memoria con TTL corto (por defecto 180s ≈ la "reserva de TC" del
     proceso comercial): evita golpear la API en cada mensaje y da vigencia estable.
-  - Degradación segura: si la API falla, devuelve el último valor cacheado o None.
+  - Degradación segura: si la API falla, no sirve caché vencida.
     El cotizador nunca sustituye una tasa Brasper por una tasa local.
 
 Config por tenant (config.quote.api):
@@ -18,7 +18,9 @@ o por entorno: BRASPER_API_BASE_URL, BRASPER_API_TTL.
 """
 from __future__ import annotations
 
+import math
 import os
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -60,7 +62,7 @@ def _fetch(url: str) -> list | None:
             data = r.json()
     except (httpx.HTTPError, ValueError) as e:
         observability.event("brasper_api.error", url=url, error=str(e)[:160])
-        return cached[1] if cached else None  # sirve caché viejo si existe
+        return None
     if isinstance(data, list):
         payload = data
     elif isinstance(data, dict):
@@ -141,14 +143,79 @@ def _integration_secret(tenant: dict) -> str | None:
     return os.getenv(api.get("integration_secret_env") or "BRASPER_IA_SHARED_SECRET")
 
 
-def _integration_request(tenant: dict, method: str, path: str, **kwargs) -> dict:
-    secret = _integration_secret(tenant)
+# Con AUTH_REQUIRED=true la API exige, además del secreto, un JWT de una cuenta de
+# servicio (docs/SECURITY_AUTH_AUDIT.md). Sin credenciales configuradas no se envía
+# Authorization (desarrollo / API con AUTH_REQUIRED=false).
+SERVICE_TOKEN_TTL_SECONDS = 600
+SERVICE_LOGIN_BACKOFF_SECONDS = 30  # credenciales malas no se reintentan en cada llamada (Argon2 en la API)
+_service = {"token": None, "expires": 0.0, "retry_after": 0.0}
+_service_lock = threading.Lock()
+
+
+def _service_token(tenant: dict, *, force: bool = False) -> str | None:
+    username = os.getenv("BRASPER_IA_SERVICE_USERNAME")
+    password = os.getenv("BRASPER_IA_SERVICE_PASSWORD")
+    if not username or not password:
+        return None
+    with _service_lock:
+        if not force and _service["token"] and _service["expires"] > time.time():
+            return _service["token"]
+        if _service["retry_after"] > time.time():
+            return None
+        _service["token"] = None
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                response = client.post(f"{_base_url(tenant)}/auth/login",
+                                       json={"username": username, "password": password},
+                                       headers={"accept": "application/json", "X-Client-App": "brasper-ia"})
+            token = response.json().get("access_token") if response.status_code == 200 else None
+        except (httpx.HTTPError, ValueError) as exc:
+            observability.event("brasper_api.service_login_error", error=type(exc).__name__)
+            _service["retry_after"] = time.time() + SERVICE_LOGIN_BACKOFF_SECONDS
+            return None
+        if not isinstance(token, str) or not token:
+            observability.event("brasper_api.service_login_rejected", status=response.status_code)
+            _service["retry_after"] = time.time() + SERVICE_LOGIN_BACKOFF_SECONDS
+            return None
+        _service["retry_after"] = 0.0
+        # Margen bajo el TTL del access token de la API (15 min): se renueva antes de vencer.
+        _service.update(token=token, expires=time.time() + SERVICE_TOKEN_TTL_SECONDS)
+        return token
+
+
+def _integration_request(tenant: dict, method: str, path: str, *, admin: bool = False,
+                         expected_errors: frozenset[int] = frozenset(), extra_headers: dict | None = None,
+                         **kwargs) -> dict:
+    secret = os.getenv("BRASPER_IA_ADMIN_SECRET") if admin else _integration_secret(tenant)
     if not secret:
         return {"ok": False, "error": "integración IA no configurada"}
-    headers = {"accept": "application/json", "X-Brasper-IA-Secret": secret}
+    headers = {**(extra_headers or {}), "accept": "application/json",
+               "X-Brasper-IA-Admin-Secret" if admin else "X-Brasper-IA-Secret": secret}
     try:
         with httpx.Client(timeout=20.0) as client:
+            bearer = _service_token(tenant)
+            if bearer:
+                headers["Authorization"] = f"Bearer {bearer}"
             response = client.request(method, f"{_base_url(tenant)}{path}", headers=headers, **kwargs)
+            # 401 del middleware (antes de ejecutar la ruta: no hubo escritura): token vencido o
+            # revocado -> un único reintento con sesión nueva. Un 401 de la propia ruta no lleva
+            # WWW-Authenticate y no se reintenta.
+            if (bearer and response.status_code == 401
+                    and response.headers.get("www-authenticate", "").lower().startswith("bearer")):
+                fresh = _service_token(tenant, force=True)
+                if fresh:
+                    headers["Authorization"] = f"Bearer {fresh}"
+                    response = client.request(method, f"{_base_url(tenant)}{path}", headers=headers, **kwargs)
+            if response.status_code in expected_errors:
+                if response.headers.get("www-authenticate", "").lower().startswith("bearer"):
+                    # Falla de la sesión de servicio, no del dato consultado: no se confunde con
+                    # "código inválido" ni con "grant revocado".
+                    observability.event("brasper_api.service_auth_failed", path=path)
+                    return {"ok": False, "status": None, "error": "autenticación de servicio rechazada"}
+                return {"ok": False, "status": response.status_code, "error": "rechazado por la API"}
+            if admin and response.status_code in {400, 404, 409, 422}:
+                return {"ok": False, "status": response.status_code,
+                        "error": response.json().get("detail", "La API rechazó la solicitud")}
             response.raise_for_status()
             data = response.json() if response.content else None
             return {"ok": True, "data": data, "status": response.status_code}
@@ -221,20 +288,89 @@ def deposit_accounts(tenant: dict, currency: str) -> dict:
     )
 
 
+def client_history(tenant: dict, user_id: str, code_phone: str, phone: str) -> dict:
+    from uuid import UUID
+    try:
+        client_id = str(UUID(user_id))
+    except (ValueError, TypeError, AttributeError):
+        return {"ok": False, "error": "identidad no válida"}
+    return _integration_request(tenant, "GET", f"/brasper/ai/clients/{client_id}/history",
+                                params={"code_phone": code_phone, "phone": phone})
+
+
+def personalized_quote(tenant: dict, identity: dict, origin: str, destination: str, amount: float, mode: str):
+    return _integration_request(tenant, "POST", "/brasper/ai/quotes", json={
+        "user_id": identity["brasper_user_id"], "code_phone": identity["codigo_telefono"],
+        "phone": identity["telefono"], "origin": origin, "destination": destination,
+        "amount": amount, "mode": mode})
+
+
+def operation_status(tenant: dict, user_id: str, code_phone: str, phone: str, reference: str = ""):
+    from uuid import UUID
+    try:
+        client_id = str(UUID(user_id))
+    except (ValueError, TypeError, AttributeError):
+        return {"ok": False, "error": "identidad no válida"}
+    params = {"code_phone": code_phone, "phone": phone}
+    if reference:
+        params["reference"] = reference
+    return _integration_request(tenant, "GET", f"/brasper/ai/clients/{client_id}/operations", params=params)
+
+
+def redeem_identity_link(tenant: dict, channel: str, subject: str, link_token: str) -> dict:
+    """Canjea un token de un uso emitido desde la sesión del cliente en el portal."""
+    return _integration_request(tenant, "POST", "/brasper/ai/identity-links/redeem",
+                                expected_errors=frozenset({401, 422, 503}),
+                                json={"channel": channel, "subject": subject, "link_token": link_token})
+
+
+def linked_operations(tenant: dict, user_id: str, grant: str, channel: str, subject: str,
+                      reference: str = "") -> dict:
+    """Estados oficiales con grant vigente; la API comprueba dueño, canal, chat y vencimiento."""
+    from uuid import UUID
+    try:
+        client_id = str(UUID(user_id))
+    except (ValueError, TypeError, AttributeError):
+        return {"ok": False, "error": "identidad no válida"}
+    params = {"channel": channel, "subject": subject}
+    if reference:
+        params["reference"] = reference
+    return _integration_request(tenant, "GET", f"/brasper/ai/identity-links/{client_id}/operations",
+                                expected_errors=frozenset({401, 404, 503}),
+                                extra_headers={"X-Brasper-Identity-Grant": grant}, params=params)
+
+
 def best_coupon(tenant: dict, origin: str, destination: str) -> dict | None:
-    """Mejor cupón activo y vigente para el par: {code, discount_percentage}."""
-    rows = _fetch(f"{_base_url(tenant)}/transactions/coupons/") or []
+    """Cupón público aplicable sin identificar al cliente.
+
+    Cupones con límite personal necesitan elegibilidad desde el backend oficial;
+    no se promete ese beneficio durante una cotización anónima.
+    """
+    rows = _fetch(f"{_base_url(tenant)}/transactions/coupons/automatic") or []
     now = datetime.now(timezone.utc)
     best = None
     for item in rows:
-        if not item.get("is_active"):
+        if not item.get("is_active") or item.get("lifecycle_status") != "ACTIVE":
+            continue
+        try:
+            if int(item["used_count"]) >= int(item["max_uses"]):
+                continue
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if item.get("per_user_limit") is not None:
             continue
         co, cd = _norm(item.get("origin_currency")), _norm(item.get("destination_currency"))
-        if co and co != origin:
-            continue
-        if cd and cd != destination:
+        scopes = item.get("exchange_rate_scopes")
+        if scopes:
+            if (not isinstance(scopes, list) or not all(isinstance(scope, str) for scope in scopes)
+                    or not ({"ALL", f"{origin}_{destination}"} & set(scopes))):
+                continue
+        elif (co and co != origin) or (cd and cd != destination):
             continue
         start, end = _parse_dt(item.get("start_date")), _parse_dt(item.get("end_date"))
+        if any(item.get(key) and (dt is None or dt.tzinfo is None)
+               for key, dt in (("start_date", start), ("end_date", end))):
+            continue
         if start and start > now:
             continue
         if end and end < now:
@@ -242,6 +378,8 @@ def best_coupon(tenant: dict, origin: str, destination: str) -> dict | None:
         try:
             disc = float(item.get("discount_percentage", 0))
         except (TypeError, ValueError):
+            continue
+        if not math.isfinite(disc) or not 0 <= disc <= 100 or not item.get("code"):
             continue
         if best is None or disc > best["discount_percentage"]:
             best = {"code": item.get("code"), "discount_percentage": disc}

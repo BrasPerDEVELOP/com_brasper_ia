@@ -17,6 +17,7 @@ Brasper. No se cruzan monedas ni se usan valores locales como respaldo.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Optional
 
 from core import tenants as T
@@ -252,6 +253,14 @@ def _commission_rate_for(ranges: list[dict], amount: float) -> float:
     return 0.0
 
 
+def _valid_coupon(coupon: Optional[dict]) -> Optional[dict]:
+    try:
+        percentage = float((coupon or {}).get("discount_percentage", 0))
+    except (TypeError, ValueError):
+        return None
+    return coupon if math.isfinite(percentage) and 0 <= percentage <= 100 else None
+
+
 def _coupon_discount(coupon: Optional[dict], base_commission: float) -> float:
     if not coupon or base_commission <= 0:
         return 0.0
@@ -259,12 +268,15 @@ def _coupon_discount(coupon: Optional[dict], base_commission: float) -> float:
         pct = float(coupon.get("discount_percentage", 0))
     except (TypeError, ValueError):
         return 0.0
-    return _round(base_commission * max(pct, 0) / 100)
+    if not math.isfinite(pct) or not 0 <= pct <= 100:
+        return 0.0
+    return _round(base_commission * pct / 100)
 
 
 def _quote_from_gross_send(amount_send: float, rate: float,
                            ranges: list[dict], coupon: Optional[dict]) -> dict:
     """Núcleo de la matemática Brasper (portado 1:1 de app/brasper_use_case.py)."""
+    coupon = _valid_coupon(coupon)
     amount_send = _round(amount_send)
     commission_rate = _commission_rate_for(ranges, amount_send)
     base_commission = _round(amount_send * commission_rate)
@@ -297,7 +309,9 @@ def _quote_inverse(desired_receive: float, rate: float,
         disc = float((coupon or {}).get("discount_percentage", 0) or 0) / 100
     except (TypeError, ValueError):
         disc = 0.0
-    net_c = rate_c * (1 - min(max(disc, 0), 1))
+    if not math.isfinite(disc) or not 0 <= disc <= 1:
+        disc = 0.0
+    net_c = rate_c * (1 - disc)
     send = _round(max(guess / (1 - net_c) if net_c < 1 else guess, 0.01))
     best = _quote_from_gross_send(send, rate, ranges, coupon)
     best_err = abs(best["amount_receive"] - target)
@@ -319,9 +333,15 @@ def _quote_inverse(desired_receive: float, rate: float,
 
 
 def compute(origin: str, destination: str,
-            amount: float, mode: str = "send") -> dict:
+            amount: float, mode: str = "send", *, identity: dict | None = None) -> dict:
     """Cotiza validando par/tasa/monto. Devuelve {'error': msg} o el quote."""
     tenant = T.get_config()
+    if identity and brasper_api.enabled(tenant):
+        result = brasper_api.personalized_quote(tenant, identity, origin, destination, amount, mode)
+        quote = result.get("data") if result.get("ok") else None
+        if _valid_official_quote(quote, origin, destination, amount, mode):
+            return quote
+        return {"error": "No pude verificar la cotización y sus beneficios en Brasper. Un asesor debe revisarla."}
     cfg = _cfg()
     language = "es"
     copy = _copy(language)
@@ -345,6 +365,27 @@ def compute(origin: str, destination: str,
     quote = fn(amount, rate, ranges, coupon)
     quote.update({"origin_currency": origin, "destination_currency": destination, "mode": mode})
     return quote
+
+
+def _valid_official_quote(q, origin, destination, amount, mode):
+    if not isinstance(q, dict) or q.get("origin_currency") != origin or q.get("destination_currency") != destination:
+        return False
+    fields = ("amount_send", "amount_receive", "rate", "commission", "commission_gross", "coupon_savings_amount")
+    if any(type(q.get(k)) not in (int, float) or not math.isfinite(q[k]) or q[k] < 0 for k in fields):
+        return False
+    if q["rate"] <= 0 or q["amount_send"] <= 0 or q["commission"] > q["amount_send"]:
+        return False
+    if q["coupon_savings_amount"] > q["commission_gross"]:
+        return False
+    if abs(q["commission_gross"] - q["commission"] - q["coupon_savings_amount"]) > 0.011:
+        return False
+    if abs(round((q["amount_send"] - q["commission"]) * q["rate"], 2) - q["amount_receive"]) > 0.011:
+        return False
+    if mode == "send" and abs(q["amount_send"] - round(amount, 2)) > 0.011:
+        return False
+    if mode == "receive" and abs(q["amount_receive"] - amount) > max(0.02, q["rate"] * 0.02):
+        return False
+    return q.get("reserved") is False
 
 
 def reply(quote: dict, language: str = "es") -> str:

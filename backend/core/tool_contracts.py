@@ -58,13 +58,29 @@ REGISTRY: dict[str, Contract] = {
         name="client.upsert", description="Alta/actualización idempotente del cliente en Brasper",
         inputs={"lead": dict}, required=frozenset({"lead"}), permission="bot", timeout=20.0, write=True,
         output_check=lambda o: isinstance(o, dict) and o.get("ok") is True),
+    "client.history": Contract(
+        name="client.history", description="Historial mínimo de cliente vinculado al teléfono del canal",
+        inputs={"user_id": str, "code_phone": str, "phone": str},
+        required=frozenset({"user_id", "code_phone", "phone"}), permission="bot", timeout=20.0,
+        output_check=_is_dict),
     "deposit.accounts": Contract(
         name="deposit.accounts", description="Cuentas oficiales Brasper por moneda", inputs={"currency": str},
         required=frozenset({"currency"}), permission="bot", timeout=20.0, output_check=_is_dict),
     "status.lookup": Contract(
-        name="status.lookup", description="Estado de una operación (NO disponible en la API IA privada: deriva a asesor)",
-        inputs={"operation_id": str, "phone": str}, required=frozenset(), permission="bot", timeout=10.0,
-        available=False),
+        name="status.lookup", description="Estado oficial de operaciones del cliente verificado; requiere flag operation_status",
+        inputs={"user_id": str, "code_phone": str, "phone": str, "reference": str},
+        required=frozenset({"user_id", "code_phone", "phone"}), permission="bot", timeout=10.0,
+        output_check=_is_dict),
+    "identity.redeem": Contract(
+        name="identity.redeem", description="Canje único de vinculación emitida desde la cuenta Brasper del cliente",
+        inputs={"channel": str, "subject": str, "link_token": str},
+        required=frozenset({"channel", "subject", "link_token"}), permission="bot", timeout=10.0, write=True,
+        output_check=_is_dict),
+    "status.linked": Contract(
+        name="status.linked", description="Estado oficial con grant de vinculación vigente (Telegram/webchat)",
+        inputs={"user_id": str, "grant": str, "channel": str, "subject": str, "reference": str},
+        required=frozenset({"user_id", "grant", "channel", "subject"}), permission="bot", timeout=10.0,
+        output_check=_is_dict),
     "message.send": Contract(
         name="message.send", description="Envío por canal (WhatsApp/Telegram) con conexión de origen",
         inputs={"channel": str, "to": str, "text": str, "connection_id": str},
@@ -123,20 +139,38 @@ def run(name: str, inputs: dict, fn: Callable[..., Any], *, idempotency_key: str
         if prev is not None:
             observability.event("tool.idempotent_replay", tool=name)
             return {**prev, "replayed": True}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        fut = pool.submit(fn, **inputs)
         try:
-            data = fut.result(timeout=c.timeout)
-        except concurrent.futures.TimeoutError:
-            observability.event("tool.timeout", tool=name, timeout_s=c.timeout)
-            return {"ok": False, "error_code": "timeout", "detail": f"sin respuesta en {c.timeout:.0f}s"}
-        except Exception as exc:  # noqa: BLE001 - error estructurado, nunca excepción al grafo
-            observability.event("tool.error", tool=name, error=str(exc)[:160])
-            return {"ok": False, "error_code": "internal", "detail": str(exc)[:160]}
-    if c.output_check and not c.output_check(data):
-        observability.event("tool.bad_output", tool=name)
-        return {"ok": False, "error_code": "upstream", "detail": "salida inválida de la herramienta"}
-    result = {"ok": True, "data": data}
-    if c.write and idempotency_key:
-        idempotency.remember(idempotency_key, result, scope=f"tool:{name}")
-    return result
+            claimed = idempotency.claim_write(idempotency_key, name)
+        except Exception:
+            return {"ok": False, "error_code": "unavailable", "detail": "no se pudo reservar la escritura"}
+        if not claimed:
+            prev = idempotency.recall(idempotency_key)
+            return ({**prev, "replayed": True} if prev is not None else
+                    {"ok": False, "error_code": "in_progress",
+                     "detail": "escritura pendiente de verificar; no se repite"})
+
+    def execute():
+        data = fn(**inputs)
+        if c.output_check and not c.output_check(data):
+            observability.event("tool.bad_output", tool=name)
+            return {"ok": False, "error_code": "upstream", "detail": "salida inválida de la herramienta"}
+        result = {"ok": True, "data": data}
+        # Persist in the worker even when the caller already timed out. A retry must
+        # never race a still-running upstream write or lose a late successful result.
+        if c.write and idempotency_key:
+            idempotency.complete_write(idempotency_key, result)
+        return result
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    fut = pool.submit(execute)
+    try:
+        return fut.result(timeout=c.timeout)
+    except concurrent.futures.TimeoutError:
+        observability.event("tool.timeout", tool=name, timeout_s=c.timeout)
+        return {"ok": False, "error_code": "timeout", "detail": f"sin respuesta en {c.timeout:.0f}s"}
+    except Exception as exc:  # noqa: BLE001
+        observability.event("tool.error", tool=name, error=type(exc).__name__)
+        return {"ok": False, "error_code": "internal", "detail": "la herramienta no completó un resultado verificable"}
+    finally:
+        # Executor.__exit__ would wait for the worker and defeat the response timeout.
+        pool.shutdown(wait=False, cancel_futures=True)

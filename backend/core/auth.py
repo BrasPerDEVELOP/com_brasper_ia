@@ -36,7 +36,7 @@ ROLE_PERMS: dict[str, list[str]] = {
     # Admin de agencia: opera todo salvo gestión de usuarios/facturación sensible.
     "admin": [
         "tenants:read", "tenants:write",
-        "conversations:read", "conversations:write",
+        "conversations:read", "conversations:write", "media:private",
         "usage:read",
         "chat:test",
         "config:read", "config:write",
@@ -58,7 +58,7 @@ ROLE_PERMS: dict[str, list[str]] = {
     # Agent: atención al cliente — lee/escribe conversaciones (handoff), sin config ni billing.
     "agent": [
         "tenants:read",
-        "conversations:read", "conversations:write",
+        "conversations:read", "conversations:write", "media:private",
         "chat:test",
     ],
     # Billing: facturación y consumo; nada de operación ni configuración.
@@ -221,6 +221,7 @@ def _row_to_user(row) -> dict:
         "name": row["name"],
         "role": row["role"],
         "token": row["token"],
+        "access_scope": row["access_scope"] if "access_scope" in row.keys() else None,
     }
 
 
@@ -236,7 +237,7 @@ def list_advisors() -> list[dict]:
     return [_row_to_user(r) for r in rows]
 
 
-def pick_advisor() -> dict | None:
+def pick_advisor(conversation_id: str | None = None) -> dict | None:
     """Derivación: elige el asesor con menos conversaciones en handoff activas.
 
     Con la flag `presence_required` solo cuenta a los asesores con presencia
@@ -251,6 +252,13 @@ def pick_advisor() -> dict | None:
         advisors = [u for u in advisors if snap.get(u["email"], {}).get("status") == "available"]
         if not advisors:
             return None
+    if conversation_id:
+        # Solo asesores con alcance sobre la conversación (canal, número, sector).
+        from . import access  # noqa: PLC0415
+        conv = db.get_conversation(conversation_id)
+        advisors = [u for u in advisors if conv and access.conversation_allowed(u, conv)]
+        if not advisors:
+            return None
     load = db.handoff_load_by_agent()
     return min(advisors, key=lambda u: (load.get(u["email"], 0), u["id"]))
 
@@ -261,7 +269,7 @@ def derive_to_advisor(conversation_id: str) -> str | None:
     Usado por el handoff del grafo y por la recepción de comprobantes (Telegram/
     WhatsApp): un solo punto de derivación para todo el sistema (DRY). La asignación
     es un claim atómico: si otro proceso la asignó un instante antes, se respeta."""
-    advisor = pick_advisor()
+    advisor = pick_advisor(conversation_id)
     if advisor:
         try:
             if not db.claim_conversation(conversation_id, advisor["email"]):
@@ -326,6 +334,7 @@ def _public_user(user: dict) -> dict:
         "name": user["name"],
         "role": user["role"],
         "permissions": permissions_for(user),
+        "access_scope": user.get("access_scope"),
     }
 
 

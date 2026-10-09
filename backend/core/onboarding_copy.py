@@ -1,0 +1,48 @@
+"""Reviewed deterministic onboarding copy; no financial values from a model."""
+COPY = {
+    "full_name": (
+        "¡Buen día! Bienvenido a Brasper Transferencias 🇵🇪🇧🇷✨\nPuedes indicarme tu nombre completo o decirme directamente cuánto deseas enviar.",
+        "Olá! Boas-vindas à Brasper Transferências 🇵🇪🇧🇷✨\nVocê pode informar seu nome completo ou dizer diretamente quanto deseja enviar."),
+    "document_type": ("¿Qué tipo de documento tienes? Puedes responder: DNI, CE, CPF, CNPJ, RUC o pasaporte.",
+                      "Qual é o tipo do seu documento? Pode responder: DNI, CE, CPF, CNPJ, RUC ou passaporte."),
+    "document_number": ("Escribe el número de tu documento, por favor.", "Informe o número do seu documento, por favor."),
+    "phone": ("Compárteme tu teléfono con código de país, por ejemplo +51 999999999 o +55 11999999999.",
+              "Informe seu telefone com código do país, por exemplo +51 999999999 ou +55 11999999999."),
+    "email": ("Si deseas, escribe tu correo. También puedes responder *omitir*; es opcional.",
+              "Se desejar, informe seu e-mail. Também pode responder *pular*; é opcional."),
+    "invalid_name": ("Puedes indicarme tu nombre completo o, si prefieres cotizar primero, dime cuánto deseas enviar y en qué moneda.",
+                     "Pode informar seu nome completo ou, se preferir uma cotação primeiro, diga quanto deseja enviar e em qual moeda."),
+    "invalid_type": ("No reconocí el tipo. Responde DNI, CE, CPF, CNPJ, RUC o pasaporte.",
+                     "Não reconheci o tipo. Responda DNI, CE, CPF, CNPJ, RUC ou passaporte."),
+    "invalid_document": ("El número de documento no parece válido. Revísalo y envíalo nuevamente.",
+                         "O número do documento não parece válido. Confira e envie novamente."),
+    "invalid_phone": ("No reconocí el teléfono. Incluye el código de país, por ejemplo +51 o +55.",
+                      "Não reconheci o telefone. Inclua o código do país, por exemplo +51 ou +55."),
+    "invalid_email": ("El correo no parece válido. Corrígelo o responde *omitir*.",
+                      "O e-mail não parece válido. Corrija ou responda *pular*."),
+    "found": ("Encontré tu perfil de Brasper ✅. Continuamos con tu envío.",
+              "Encontrei seu perfil na Brasper ✅. Vamos continuar com seu envio."),
+    "returning": ("¡Hola, {name}! Qué gusto atenderte nuevamente en Brasper 😊\n¿Cuánto deseas enviar hoy?",
+                  "Olá, {name}! Que bom atender você novamente na Brasper 😊\nQuanto deseja enviar hoje?"),
+    "amount": ("¿Cuánto deseas enviar y en qué moneda?", "Quanto deseja enviar e em qual moeda?"),
+    "named": ("¡Mucho gusto, {name}! 🙌 Ahora dime cuánto deseas enviar y en qué moneda.",
+              "Prazer, {name}! 🙌 Agora diga quanto deseja enviar e em qual moeda."),
+    "sync_error": ("Guardé tus datos, pero no pude sincronizarlos con Brasper ahora. Un asesor lo revisará aquí mismo.",
+                   "Guardei seus dados, mas não consegui sincronizá-los com a Brasper agora. Um atendente vai verificar por aqui."),
+    "created": ("Listo, tu perfil fue registrado en Brasper ✅. ", "Pronto, seu perfil foi cadastrado na Brasper ✅. "),
+    "identified": ("Listo, tu perfil fue identificado en Brasper ✅. ", "Pronto, seu perfil foi identificado na Brasper ✅. "),
+    "continue": ("Continuamos con tu envío.", "Vamos continuar com seu envio."),
+    "quote": ("Ya puedes solicitar tu cotización.", "Já pode solicitar sua cotação."),
+    "need_quote": ("Primero necesito una cotización para saber en qué moneda realizarás el depósito.",
+                   "Primeiro preciso de uma cotação para saber em qual moeda você fará o depósito."),
+    "accounts_unavailable": ("No pude consultar las cuentas oficiales. Un asesor se comunicará contigo por este chat para ayudarte a continuar.",
+                             "Não consegui consultar as contas oficiais. Um atendente vai falar com você por este chat para ajudar a continuar."),
+    "accounts": ("Estas son las cuentas oficiales de Brasper para depositar en {currency}:",
+                 "Estas são as contas oficiais da Brasper para depositar em {currency}:"),
+    "proof": ("Cuando realices el depósito, envía el comprobante por este chat. Un agente comercial verificará el pago y registrará la operación.",
+              "Após fazer o depósito, envie o comprovante por este chat. Um atendente comercial verificará o pagamento e registrará a operação."),
+}
+
+
+def text(key: str, language: str = "es", **values) -> str:
+    return COPY[key][1 if language == "pt" else 0].format(**values)

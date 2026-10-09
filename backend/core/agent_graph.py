@@ -9,9 +9,9 @@ from typing import Any, TypedDict
 from langgraph.graph import END, StateGraph
 
 from core import tenants as T
-from core import features, handoff_summary, knowledge, tool_contracts  # atención autónoma
+from core import agent_profiles, features, handoff_summary, knowledge, tool_contracts  # atención autónoma
 import time as _time
-from . import auth, calendar_adapter, connectors, db, lead_onboarding, llm, observability, policies, quotes, tool_router, util
+from . import auth, calendar_adapter, connectors, db, lead_onboarding, llm, observability, policies, quotes, tool_router, util, media_library
 
 
 # Canales externos a los que el bot NUNCA debe derivar: con takeover el asesor
@@ -66,7 +66,9 @@ class AgentState(TypedDict, total=False):
     usage: dict | None
     new_lead: bool
     banner: dict | None
+    link_token: str | None
     flow: str
+    human_revision: int
 
 
 # Intención de PROCEDER con el envío tras una cotización (checkout). Deben ser
@@ -137,16 +139,20 @@ def start_conversation(state: AgentState) -> dict[str, Any]:
     )
     # Estado ANTES de este mensaje: si ya está en 'handoff', un humano la atiende
     # y el bot no debe responder (se registra el mensaje para que el asesor lo vea).
-    prev_status = db.conversation_status(cid)
     # Lead nuevo: primer mensaje de este usuario (antes de guardarlo).
     new_lead = db.is_first_contact(state["user_ref"])
     db.add_message(cid, "user", state["text"], media=state.get("user_media"))
+    snapshot = db.get_conversation(cid) or {}
+    prev_status = snapshot.get("status", "active")
+    human_revision = int(snapshot.get("human_revision", 0))
+    from . import engagement
+    engagement.record_consent(cid, state["text"])
     # Fase 3: guarda datos base del lead (canal). Idioma/ruta/monto se completan luego.
     db.merge_lead_data(cid, {"canal": state.get("channel", "webchat")})
     observability.event("message.received", channel=state.get("channel", "webchat"), conversation_id=cid)
     if new_lead:
         observability.event("lead.new", conversation_id=cid, channel=state.get("channel", "webchat"))
-    return {"cid": cid, "conv_status": prev_status, "new_lead": new_lead}
+    return {"cid": cid, "conv_status": prev_status, "new_lead": new_lead, "human_revision": human_revision}
 
 
 def pre_process(state: AgentState) -> dict[str, Any]:
@@ -159,9 +165,15 @@ def pre_process(state: AgentState) -> dict[str, Any]:
     if (is_quote and analysis.get("amount") is None and not analysis.get("currencies")
             and features.enabled("knowledge") and knowledge.has_intent(state["text"])):
         is_quote = False
+    # "¿ya llegó mi envío PxB-77?": el número de la referencia no es un monto a cotizar.
+    if is_quote and not analysis.get("currencies") and _status_hit(state["text"]):
+        is_quote = False
     tool_request = None if is_quote else tool_router.select_tool(state["text"])
     checkout = (not is_quote) and _checkout_hit(state["text"])
     lead = db.get_lead_data(state["cid"])
+    analysis["language"] = policies.detect_language(state["text"], fallback=lead.get("idioma", "es"))
+    if analysis["language"] != lead.get("idioma"):
+        lead = db.merge_lead_data(state["cid"], {"idioma": analysis["language"]})
     onboarding = (not is_quote) and lead_onboarding.needs_onboarding(
         lead, new_lead=bool(state.get("new_lead")), checkout=checkout, text=state["text"]
     )
@@ -185,14 +197,31 @@ def pre_process(state: AgentState) -> dict[str, Any]:
 
 
 def route_after_preprocess(state: AgentState) -> str:
+    route = _route_after_preprocess(state)
+    if route in {"paused", "handoff", "identity_link"}:
+        return route
+    profile = agent_profiles.resolve(state["cid"], state.get("channel", "webchat"))
+    if profile and route not in profile["profile"].get("capabilities", []):
+        observability.event("agent_profile.capability_denied", conversation_id=state["cid"], capability=route)
+        return "handoff"
+    # Onboarding can also display official deposit accounts on completion.
+    if (route == "onboarding" and state.get("analysis", {}).get("checkout") and profile
+            and "deposit" not in profile["profile"].get("capabilities", [])):
+        return "handoff"
+    return route
+
+
+def _route_after_preprocess(state: AgentState) -> str:
     # Conversación ya en manos de un asesor humano -> el bot no responde.
     if state.get("conv_status") == "handoff":
         return "paused"
+    if state.get("link_token"):
+        return "identity_link"
     analysis = state.get("analysis", {})
-    if analysis.get("onboarding"):
-        return "onboarding"
     if analysis.get("handoff"):
         return "handoff"
+    if analysis.get("onboarding"):
+        return "onboarding"
     # Estado de un envío: la API IA no lo expone -> asesor con resumen (nunca inventar).
     if analysis.get("status"):
         return "status"
@@ -308,14 +337,21 @@ _STATUS_REPLY = {
 
 
 def handle_status(state: AgentState) -> dict[str, Any]:
-    """Consulta de estado de una operación: la API IA privada no expone esta
-    capacidad (contrato `status.lookup` no disponible), así que se deriva con resumen
-    en vez de inventar un estado."""
+    """Consulta privada con identidad verificada; deriva si falta autorización,
+    la capacidad está apagada o la autoridad no devuelve un resultado válido."""
     cid = state["cid"]
     lang = state.get("analysis", {}).get("language", "es")
-    probe = tool_contracts.run("status.lookup", {}, lambda: None)
-    assert not probe.get("ok")  # documenta la ausencia de API; si algún día existe, se implementa aquí
+    from . import operation_status
+    reply = operation_status.lookup(cid, state.get("channel", "webchat"), state["user_ref"], state["text"], lang)
+    if reply is not None:
+        db.add_message(cid, "assistant", reply)
+        observability.event("operation.status_queried", conversation_id=cid)
+        return {"response": reply, "handoff": False, "usage": None}
     reply = _STATUS_REPLY.get(lang, _STATUS_REPLY["es"])
+    from . import identity_link
+    hint = identity_link.portal_hint(state.get("channel", "webchat"), state["user_ref"], lang)
+    if hint:
+        reply = f"{reply}\n\n{hint}"
     db.set_conversation_status(cid, "handoff")
     assigned = auth.derive_to_advisor(cid)
     if assigned is None:
@@ -327,12 +363,25 @@ def handle_status(state: AgentState) -> dict[str, Any]:
     return {"response": reply, "handoff": True, "usage": None}
 
 
+def handle_identity_link(state: AgentState) -> dict[str, Any]:
+    """Canje determinista del token de vinculación (sin LLM; el token nunca se persiste)."""
+    from . import identity_link
+    cid = state["cid"]
+    lang = state.get("analysis", {}).get("language", "es")
+    reply = identity_link.redeem(cid, state.get("channel", "webchat"), state["user_ref"], state["link_token"], lang)
+    db.add_message(cid, "assistant", reply)
+    return {"response": reply, "handoff": False, "usage": None}
+
+
 def handle_info(state: AgentState) -> dict[str, Any]:
     """Pregunta informativa: FAQ aprobada con fuente. Sin coincidencia -> incertidumbre
     explícita (no inventa) y oferta de asesor; sin LLM en ambos casos."""
     cid = state["cid"]
     lang = state.get("analysis", {}).get("language", "es")
-    run = tool_contracts.run("knowledge.search", {"query": state["text"], "lang": lang}, knowledge.search)
+    profile = agent_profiles.resolve(cid, state.get("channel", "webchat"))
+    allowed_ids = profile["profile"].get("knowledge_ids") if profile else None
+    run = tool_contracts.run("knowledge.search", {"query": state["text"], "lang": lang},
+                            lambda query, lang: knowledge.search(query, lang, allowed_ids=allowed_ids))
     hit = run.get("data") if run.get("ok") else None
     if hit:
         reply = knowledge.reply(hit, lang)
@@ -416,8 +465,13 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
         db.add_message(state["cid"], "assistant", reply)
         observability.event("quote.clarify", conversation_id=state["cid"], missing=request["missing"])
         return {"response": reply, "handoff": False, "usage": None}
+    identity = None
+    if _lead.get("brasper_user_id") and features.enabled("campaigns"):
+        history = lead_onboarding.refresh_history(state["cid"], state.get("channel", "webchat"), state["user_ref"])
+        if history:
+            identity = _lead
     quote = quotes.compute(request["origin"], request["destination"],
-                           request["amount"], request["mode"])
+                           request["amount"], request["mode"], identity=identity)
     language = state.get("analysis", {}).get("language", "es")
     reply = quotes.reply(quote, language)
     tid, cid = tenant["id"], state["cid"]
@@ -432,8 +486,12 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
             "tasa": quote.get("rate"),
             "estado_tc": "activo",
             "aplica_promo": bool(quote.get("coupon_code")),
+            "coupon_id": quote.get("coupon_id"),
+            "coupon_code": quote.get("coupon_code"),
+            "campaign_version": quote.get("campaign_version"),
+            "coupon_savings_amount": quote.get("coupon_savings_amount", 0),
             "cotizado_en": util.now_iso(),
-        })
+        }, allow_null=True)
         conv = db.get_conversation(cid)
         cust_id = conv.get("customer_id") if conv else None
         db.create_quote(
@@ -450,6 +508,9 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
     threshold = _high_amount_threshold()
     high = (not quote.get("error")) and bool(threshold) and float(request["amount"] or 0) >= threshold
     final = reply + ("\n\n" + _high_amount_note(language) if high else "")
+    banner = media_library.campaign_banner(quote, _lead, language) if identity and not quote.get("error") else None
+    if banner:
+        final += "\n\n" + banner["text"]
     db.add_message(cid, "assistant", final)
     observability.event("quote.completed", conversation_id=cid,
                         ok=not quote.get("error"), origin=request["origin"],
@@ -459,8 +520,8 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
         assigned = auth.derive_to_advisor(cid)
         observability.event("conversation.handoff", conversation_id=cid,
                             reason="high_amount", assigned_to=assigned)
-        return {"response": final, "handoff": True, "usage": None}
-    return {"response": final, "handoff": False, "usage": None}
+        return {"response": final, "handoff": True, "usage": None, "banner": banner}
+    return {"response": final, "handoff": False, "usage": None, "banner": banner}
 
 
 def _high_amount_threshold() -> float | None:
@@ -535,6 +596,9 @@ def build_messages(state: AgentState) -> dict[str, Any]:
     base_prompt = tenant.get("system_prompt", "")
     lang_line = _language_line(analysis.get("language", "es"))
     system_prompt = f"{lang_line}\n{base_prompt}" if base_prompt else lang_line
+    profile = agent_profiles.resolve(state["cid"], state.get("channel", "webchat"))
+    if profile:
+        system_prompt += "\n" + agent_profiles.prompt(profile["profile"], analysis.get("language", "es"))
     history = db.get_history(state["cid"], limit=12)
     # Limpia el historial: turnos viejos del asistente pudieron ofrecer WhatsApp
     # (CTA antiguo del cotizador). Si el LLM los ve, los imita aunque el prompt lo
@@ -660,6 +724,7 @@ def graph():
     workflow.add_node("handle_tool", handle_tool)
     workflow.add_node("handle_info", handle_info)
     workflow.add_node("handle_status", handle_status)
+    workflow.add_node("handle_identity_link", handle_identity_link)
     workflow.add_node("build_messages", build_messages)
     workflow.add_node("call_llm", call_llm)
     workflow.add_node("persist_llm", persist_llm)
@@ -672,10 +737,11 @@ def graph():
         route_after_preprocess,
         {"paused": "bot_paused", "onboarding": "handle_onboarding", "deposit": "handle_deposit_accounts",
          "handoff": "do_handoff", "calendar": "handle_calendar", "status": "handle_status",
-         "quote": "handle_quote", "info": "handle_info", "tool": "handle_tool", "llm": "build_messages"},
+         "identity_link": "handle_identity_link", "quote": "handle_quote", "info": "handle_info", "tool": "handle_tool", "llm": "build_messages"},
     )
     workflow.add_edge("handle_info", END)
     workflow.add_edge("handle_status", END)
+    workflow.add_edge("handle_identity_link", END)
     workflow.add_edge("handle_onboarding", END)
     workflow.add_edge("handle_deposit_accounts", END)
     workflow.add_edge("bot_paused", END)
@@ -703,6 +769,8 @@ def _flow_name(state: dict) -> str:
         return "paused"
     if state.get("llm_error"):
         return "llm_failed"
+    if state.get("link_token"):
+        return "identity_link"
     for key, name in (("onboarding", "onboarding"), ("handoff", "handoff"), ("status", "status"),
                       ("calendar", "calendar")):
         if a.get(key):
@@ -721,9 +789,10 @@ def _flow_name(state: dict) -> str:
 async def handle_message(user_ref: str, text: str,
                          channel: str = "webchat",
                          conversation_id: str | None = None,
-                         user_media: dict | None = None) -> dict:
+                         user_media: dict | None = None, link_token: str | None = None) -> dict:
     t0 = _time.perf_counter()
     state = await graph().ainvoke({
+        "link_token": link_token,
         "user_ref": user_ref,
         "text": text,
         "channel": channel,
@@ -741,4 +810,5 @@ async def handle_message(user_ref: str, text: str,
         "paused": state.get("paused", False),
         "new_lead": state.get("new_lead", False),
         "banner": state.get("banner"),
+        "human_revision": state.get("human_revision", 0),
     }

@@ -78,10 +78,25 @@ def remember(key: str, result: dict, scope: str = "write") -> None:
         pass
 
 
+def claim_write(key: str, tool: str) -> bool:
+    """Atomically reserve a write before calling the upstream API; fail closed."""
+    with db.connect() as con:
+        return _insert_ignore(con, key, f"tool:{tool}", None)
+
+
+def complete_write(key: str, result: dict) -> None:
+    with db.connect() as con:
+        changed = con.execute("UPDATE idempotency_keys SET result=? WHERE key=?",
+                              (json.dumps(result, ensure_ascii=False), key))
+        if changed.rowcount != 1:
+            raise RuntimeError("La reserva de escritura no existe")
+
+
 def purge(older_than_hours: int | None = None) -> int:
     hours = older_than_hours or int(os.getenv("IDEMPOTENCY_TTL_HOURS", "72"))
     from datetime import datetime, timedelta, timezone
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
     with db.connect() as con:
-        cur = con.execute("DELETE FROM idempotency_keys WHERE created_at < ?", (cutoff,))
+        # Unknown writes cannot safely be forgotten: they may have succeeded upstream.
+        cur = con.execute("DELETE FROM idempotency_keys WHERE created_at < ? AND scope NOT LIKE 'tool:%'", (cutoff,))
         return int(cur.rowcount or 0)

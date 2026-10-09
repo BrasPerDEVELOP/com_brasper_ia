@@ -32,6 +32,11 @@ if str(BACKEND_DIR) not in sys.path:
 os.environ["DATABASE_URL"] = ""
 os.environ["REDIS_URL"] = ""
 os.environ["APP_ENV"] = "development"
+for _name in ("PANEL_ADMIN_EMAIL", "PANEL_ADMIN_TOKEN", "PANEL_LOGIN_CODE", "SEED_DEMO_USERS",
+              "TENANTS_SOURCE", "TENANTS_BOOTSTRAP_OVERWRITE", "CHANNEL_DEBOUNCE_SECONDS", "BRASPER_IA_GRANT_KEY",
+              "WHATSAPP_REQUIRE_SIGNATURE", "WHATSAPP_APP_SECRET", "META_APP_SECRET",
+              "BRASPER_IA_SERVICE_USERNAME", "BRASPER_IA_SERVICE_PASSWORD"):
+    os.environ[_name] = ""  # un .env local de operación no altera los escenarios
 os.environ["WA_PHONE_NUMBER_ID_BRASPER"] = "PNID_EVAL_1"
 
 _TMP = Path(tempfile.mkdtemp(prefix="evals_"))

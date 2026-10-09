@@ -66,7 +66,7 @@ def cmd_create_admin(args) -> None:
                         (token, name, email))
         print(f"[create-admin] admin '{email}' actualizado (rol=owner, token rotado).")
     else:
-        auth.create_user(email, name, "owner", tenant_scope=None, token=token)
+        auth.create_user(email, name, "owner", token=token)
         print(f"[create-admin] admin '{email}' creado (rol=owner).")
     print(f"[create-admin] TOKEN (guárdalo, se muestra ahora): {token}")
     print("  Úsalo en el header 'X-Auth-Token', o loguéate con este email + PANEL_LOGIN_CODE.")
@@ -108,6 +108,16 @@ def cmd_list_tenants(_args) -> None:
         print(f"  {tid:16} {t.get('vertical',''):24} {llm_ok}  canales: {', '.join(chans) or 'webchat'}")
 
 
+def cmd_set_scope(args) -> None:
+    """Alcance por canal/número/sector (listas separadas por coma; vacío = sin restricción)."""
+    from core import access
+    db.init_db()
+    split = lambda raw: [v.strip() for v in (raw or "").split(",") if v.strip()]  # noqa: E731
+    scope = access.set_scope(args.email, {"channels": split(args.channels),
+                                          "connections": split(args.connections), "sectors": split(args.sectors)})
+    print(f"[set-scope] {args.email.strip().lower()}: {scope}")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Bootstrap/administracion del panel")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -120,6 +130,12 @@ def main() -> int:
     ca.add_argument("--name", default=None)
     ca.add_argument("--token", default=None, help="opcional; si falta se genera")
 
+    sc = sub.add_parser("set-scope", help="limitar un usuario a canales/números/sectores")
+    sc.add_argument("--email", required=True)
+    sc.add_argument("--channels", default="")
+    sc.add_argument("--connections", default="")
+    sc.add_argument("--sectors", default="")
+
     sub.add_parser("list-users", help="listar usuarios del panel")
     sub.add_parser("list-tenants", help="listar clientes de config/tenants.json")
 
@@ -128,6 +144,7 @@ def main() -> int:
         "init": cmd_init,
         "migrate": cmd_migrate,
         "create-admin": cmd_create_admin,
+        "set-scope": cmd_set_scope,
         "list-users": cmd_list_users,
         "list-tenants": cmd_list_tenants,
     }[args.cmd](args)

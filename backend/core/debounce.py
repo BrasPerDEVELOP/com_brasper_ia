@@ -34,7 +34,7 @@ def buffer_message(tenant_id: str, channel: str, user_ref: str,
     delay = delay_seconds()
     if r is None or delay <= 0:
         return False
-    base = _base_key(tenant_id, channel, user_ref)
+    base = _base_key(tenant_id, channel, delivery.get("conversation_id") or user_ref)
     payload = {**delivery, "tenant_id": tenant_id, "channel": channel, "user_ref": user_ref}
     due_at = time.time() + delay
     pipe = r.pipeline()
