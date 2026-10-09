@@ -1,5 +1,6 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { api } from "@/lib/api";
 import type { Advisor, Conversation, HandoffSummary, Note } from "@/lib/api";
 import { chanOf, displayName, formatRef, LEAD_LABELS, leadStr, relTime, shortEmail, statusLabel, type Lead } from "@/lib/format";
 import Icon from "../Icon";
@@ -8,6 +9,32 @@ import { Avatar } from "./ConversationItem";
 const ORDER = ["ruta", "modo", "monto_enviar", "monto_recibir", "tasa", "estado_tc", "aplica_promo"];
 const IDENTITY = ["nombre", "documento", "tipo_cliente", "idioma", "banco_pix", "beneficiario"];
 const SUGGESTED_TAGS = ["primer envío", "monto alto", "reclamo", "comprobante", "vip", "seguimiento"];
+
+type Delivery = { id: string; channel: string; state: string; detail: string | null; created_at: string };
+const DELIVERY_TAG: Record<string, string> = { uncertain: "Incierto", failed: "Fallido", cancelled: "Cancelado" };
+const DELIVERY_LABEL: Record<string, string> = {
+  uncertain: "El canal pudo haberlo entregado; revisar antes de reenviar",
+  failed: "Rechazado por el canal", cancelled: "Intervino un humano antes del envío",
+};
+
+/** Salidas automáticas que no se confirmaron: el asesor decide; nunca se reintentan solas. */
+function DeliveryIssues({ conversationId }: { conversationId: string }) {
+  const [items, setItems] = useState<Delivery[]>([]);
+  useEffect(() => {
+    let alive = true;
+    api<{ deliveries: Delivery[] }>(`/api/conversations/${conversationId}/deliveries`)
+      .then(d => { if (alive) setItems(d.deliveries.filter(x => x.state in DELIVERY_LABEL)); })
+      .catch(() => { if (alive) setItems([]); });
+    return () => { alive = false; };
+  }, [conversationId]);
+  if (!items.length) return null;
+  return (
+    <div className="psec">
+      <h4><Icon name="clock" /> Envíos del bot sin confirmar</h4>
+      <ul>{items.slice(0, 5).map(d => <li key={d.id}><span className={`tag ${d.state === "cancelled" ? "" : "warn"}`}>{DELIVERY_TAG[d.state]}</span> {DELIVERY_LABEL[d.state]} · {relTime(d.created_at)}</li>)}</ul>
+    </div>
+  );
+}
 
 export default function LeadCard({ c, lead, notes, tags, advisors, load, canAssign, canDelete, busy, onClose, onAssign, onDelete, onAddTag, onRemoveTag }: {
   c: Conversation; lead: Lead; notes: Note[]; tags: string[]; advisors: Advisor[]; load: Record<string, number>;
@@ -44,6 +71,8 @@ export default function LeadCard({ c, lead, notes, tags, advisors, load, canAssi
         </div>
         {profileName && profileName !== name && <small title="Nombre de perfil de WhatsApp (no es identidad verificada)">Perfil WA: {profileName}</small>}
       </div>
+
+      <DeliveryIssues conversationId={c.id} />
 
       {handoff && c.status === "handoff" && (
         <div className="psec">

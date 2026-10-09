@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, can, DeletionRequest, DocOverview, PublicDocument } from "@/lib/api";
 import { Markdown } from "@/lib/markdown";
 import { useMe } from "@/components/AppFrame";
@@ -30,37 +30,66 @@ export default function Documentos() {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loadingDoc, setLoadingDoc] = useState(true);
+  const [docError, setDocError] = useState("");
+  const [edited, setEdited] = useState(false);
+  const requestVersion = useRef(0);
   const [requests, setRequests] = useState<DeletionRequest[]>([]);
 
   const loadOverview = useCallback(() => api<{ documents: DocOverview[] }>("/api/admin/documents").then(d => setOverview(d.documents)).catch(() => {}), []);
   const loadDoc = useCallback(() => {
+    const request = ++requestVersion.current;
+    setLoadingDoc(true); setDocError("");
     api<{ latest: PublicDocument | null; published: PublicDocument | null; history: PublicDocument[] }>(`/api/admin/documents/${slug}?lang=${lang}`)
       .then(d => {
+        if (request !== requestVersion.current) return;
         setLatest(d.latest); setPublished(d.published); setHistory(d.history);
         setTitle(d.latest?.title || SLUG_LABEL[slug]);
         setBody(d.latest?.body_md || TEMPLATE[slug] || "");
-      }).catch(e => toast((e as Error).message, "err"));
-  }, [slug, lang, toast]);
+        setEdited(false);
+      }).catch(e => {
+        if (request === requestVersion.current) setDocError((e as Error).message);
+      }).finally(() => {
+        if (request === requestVersion.current) setLoadingDoc(false);
+      });
+  }, [slug, lang]);
   const loadRequests = useCallback(() => {
     if (!canEdit) return;
     api<{ requests: DeletionRequest[] }>("/api/admin/deletion-requests").then(d => setRequests(d.requests)).catch(() => {});
   }, [canEdit]);
 
   useEffect(() => { loadOverview(); loadRequests(); }, [loadOverview, loadRequests]);
-  useEffect(() => { loadDoc(); }, [loadDoc]);
+  useEffect(() => { loadDoc(); return () => { requestVersion.current++; }; }, [loadDoc]);
+  useEffect(() => {
+    if (!edited) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [edited]);
 
   const dirty = useMemo(() => (latest ? latest.title !== title || latest.body_md !== body : body.trim().length > 0), [latest, title, body]);
 
+  function selectDoc(nextSlug: string, nextLang: "es" | "pt") {
+    if (busy || (nextSlug === slug && nextLang === lang)) return;
+    if (edited && !window.confirm("Hay cambios sin guardar. ¿Quieres descartarlos y abrir otro documento?")) return;
+    requestVersion.current++;
+    setLoadingDoc(true); setEdited(false); setDocError("");
+    setLatest(null); setPublished(null); setHistory([]); setTitle(""); setBody("");
+    setSlug(nextSlug); setLang(nextLang);
+  }
+
   async function saveDraft() {
+    if (busy || loadingDoc || docError) return;
     setBusy(true);
     try {
-      await api(`/api/admin/documents/${slug}`, { method: "PUT", body: JSON.stringify({ lang, title, body_md: body }) });
+      await api(`/api/admin/documents/${slug}`, { method: "PUT", body: JSON.stringify({ lang, title, body_md: body, expected_version: latest?.version ?? 0 }) });
       toast("Borrador guardado (no es público)", "ok");
       loadDoc(); loadOverview();
     } catch (e) { toast((e as Error).message, "err"); }
     setBusy(false);
   }
   async function publish() {
+    if (busy || loadingDoc || docError || dirty) return;
     if (!latest || latest.status !== "draft") { toast("Guarda un borrador antes de publicar", "warn"); return; }
     setBusy(true);
     try {
@@ -89,7 +118,7 @@ export default function Documentos() {
       <div className="cards" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", marginBottom: 16 }}>
         {overview.map(d => (
           <div key={`${d.slug}-${d.lang}`} className={"card" + (d.slug === slug && d.lang === lang ? "" : "")} style={{ cursor: "pointer", outline: d.slug === slug && d.lang === lang ? "2px solid var(--brand)" : "none" }}
-            onClick={() => { setSlug(d.slug); setLang(d.lang as "es" | "pt"); }}>
+            onClick={() => selectDoc(d.slug, d.lang as "es" | "pt")}>
             <div className="card-head" style={{ marginBottom: 6 }}>
               <h3 style={{ fontSize: 15 }}>{SLUG_LABEL[d.slug]} <span className="tag">{d.lang.toUpperCase()}</span></h3>
               {d.published_version ? <span className="tag ok">Publicado v{d.published_version}</span> : <span className="tag warn">Sin publicar</span>}
@@ -113,19 +142,21 @@ export default function Documentos() {
           </div>
           {canEdit && (
             <div style={{ display: "flex", gap: 6 }}>
-              <button className="btn btn-ghost btn-sm" onClick={saveDraft} disabled={busy || !dirty || !title.trim() || !body.trim()}><Icon name="note" size={14} /> Guardar borrador</button>
-              <button className="btn btn-sm" onClick={publish} disabled={busy || !latest || latest.status !== "draft" || dirty} title={dirty ? "Guarda el borrador antes de publicar" : "Publica la versión guardada"}>
+              <button className="btn btn-ghost btn-sm" onClick={saveDraft} disabled={busy || loadingDoc || !!docError || !dirty || !title.trim() || !body.trim()}><Icon name="note" size={14} /> Guardar borrador</button>
+              <button className="btn btn-sm" onClick={publish} disabled={busy || loadingDoc || !!docError || !latest || latest.status !== "draft" || dirty} title={dirty ? "Guarda el borrador antes de publicar" : "Publica la versión guardada"}>
                 <Icon name="check" size={14} /> Publicar v{latest?.status === "draft" ? latest.version : "—"}
               </button>
             </div>
           )}
         </div>
+        {loadingDoc && <p role="status">Cargando documento…</p>}
+        {docError && <p role="alert">{docError} <button className="btn btn-sm" onClick={loadDoc}>Reintentar</button></p>}
         <label className="fld" style={{ marginBottom: 10 }}>Título
-          <input value={title} onChange={e => setTitle(e.target.value)} disabled={!canEdit} maxLength={200} />
+          <input value={title} onChange={e => { setTitle(e.target.value); setEdited(true); }} disabled={!canEdit || busy || loadingDoc || !!docError} maxLength={200} />
         </label>
         <div className="md-editor">
           <label className="fld">Contenido (Markdown)
-            <textarea value={body} onChange={e => setBody(e.target.value)} disabled={!canEdit} spellCheck={false} />
+            <textarea value={body} onChange={e => { setBody(e.target.value); setEdited(true); }} disabled={!canEdit || busy || loadingDoc || !!docError} spellCheck={false} />
           </label>
           <div>
             <div className="fld" style={{ marginBottom: 5 }}>Vista previa</div>

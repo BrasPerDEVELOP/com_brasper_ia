@@ -3,8 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import Icon from "@/components/Icon";
 
-interface Bubble { role: "user" | "assistant"; text: string; meta?: string; }
-interface ChatResp { response: string; conversation_id: string; handoff: boolean; usage: { tokens_in: number; tokens_out: number; cost_usd: number; model: string } | null; }
+interface Bubble { role: "user" | "assistant"; text: string; meta?: string; image?: string; }
+interface ChatResp { response: string; conversation_id: string; handoff: boolean; banner?: { image_url?: string }; usage: { tokens_in: number; tokens_out: number; cost_usd: number; model: string } | null; }
 
 export default function Chat() {
   const [bubbles, setBubbles] = useState<Bubble[]>([]);
@@ -28,7 +28,7 @@ export default function Chat() {
       convId.current = r.conversation_id;
       const meta = r.handoff ? "handoff · sin costo LLM"
         : r.usage ? `${r.usage.model} · ${r.usage.tokens_in}→${r.usage.tokens_out} tok · US$ ${r.usage.cost_usd}` : "determinista · sin costo LLM";
-      setBubbles(b => [...b, { role: "assistant", text: r.response, meta }]);
+      setBubbles(b => [...b, { role: "assistant", text: r.response, meta, image: r.banner?.image_url }]);
     } catch (e) {
       setBubbles(b => [...b, { role: "assistant", text: "⚠️ " + (e as Error).message }]);
     } finally { setBusy(false); }
@@ -48,7 +48,7 @@ export default function Chat() {
       <div className="thread card-like" style={{ height: "calc(100dvh - var(--hdr-h) - 120px)", minHeight: 360 }}>
         <div className="msgs" ref={boxRef}>
           {bubbles.length ? bubbles.map((b, i) => (
-            <div key={i} className={"msg " + b.role}>{b.text}{b.meta && <small className="ts">{b.meta}</small>}</div>
+            <div key={i} className={"msg " + b.role}>{b.image && <img src={b.image} alt="Imagen de la promoción" style={{ maxWidth: "100%", maxHeight: 360 }} />}{b.text}{b.meta && <small className="ts">{b.meta}</small>}</div>
           )) : <div className="empty">Escribe abajo. Cada respuesta llama al bot real; las cotizaciones y el handoff no gastan LLM.</div>}
           {busy && <div className="msg assistant pending">…</div>}
         </div>

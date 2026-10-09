@@ -24,15 +24,20 @@ const GROUPS: { sec: string; items: NavItem[] }[] = [
   ]},
   { sec: "Configuración", items: [
     { href: "/bot", label: "Bot y prompt", icon: "bot", perm: "tenants:write" },
+    { href: "/agentes", label: "Agentes de IA", icon: "bot", perm: "config:read" },
+    { href: "/promociones", label: "Promociones", icon: "tag", perm: "config:read" },
+    { href: "/biblioteca", label: "Imágenes aprobadas", icon: "file", perm: "config:read" },
+    { href: "/seguimiento", label: "Encuestas y seguimiento", icon: "clock", perm: "config:read" },
     { href: "/conocimiento", label: "Conocimiento", icon: "note", perm: "conversations:read" },
     { href: "/integraciones", label: "Integraciones", icon: "puzzle", perm: "config:read" },
     { href: "/plantillas", label: "Plantillas", icon: "file", perm: "config:read" },
     { href: "/documentos", label: "Documentos públicos", icon: "tag", perm: "config:read" },
+    { href: "/accesos", label: "Accesos", icon: "puzzle", perm: "users:read" },
   ]},
 ];
 const TITLES: Record<string, string> = {
   "/conversaciones": "Bandeja de conversaciones", "/ops": "Monitoreo y salud del servicio",
-  "/conocimiento": "Conocimiento, herramientas y flags", "/documentos": "Documentos públicos y privacidad",
+  "/conocimiento": "Conocimiento, herramientas y flags", "/documentos": "Documentos públicos y privacidad", "/accesos": "Accesos por canal, número y sector",
 };
 
 // ---------- tema ----------

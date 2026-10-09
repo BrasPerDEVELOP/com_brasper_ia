@@ -20,7 +20,10 @@ export function getToken(): string {
 }
 
 export function clearToken() {
-  if (typeof window !== "undefined") localStorage.removeItem("cauce_token");
+  if (typeof window !== "undefined") {
+    localStorage.removeItem("cauce_token");
+    window.dispatchEvent(new Event("cauce:session-cleared"));
+  }
 }
 
 /** Construye un query string omitiendo valores vacíos (y codificando "+00:00"). */
@@ -99,6 +102,7 @@ export interface Conversation {
 }
 export interface ConversationsResp { conversations: Conversation[]; count?: number; next_before?: string | null }
 export interface MediaRef {
+  conversation_id?: string;
   provider: string; kind: string; ref: string;
   mime?: string; name?: string | null; caption?: string;
 }
