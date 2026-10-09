@@ -37,3 +37,9 @@ backend/backups/
 .cursor/
 .agents/
 .kombai/
+
+# Configuración privada y copias locales
+.env
+.env.*
+!.env.example
+!.env.sample

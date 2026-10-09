@@ -1,0 +1,39 @@
+name: brasper-local-validation
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: brasper_test
+      POSTGRES_PASSWORD: synthetic-local-test-only
+      POSTGRES_DB: brasper_test_ia
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U brasper_test -d brasper_test_ia"]
+      interval: 2s
+      retries: 30
+    networks: [isolated]
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --save, "", --appendonly, "no"]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      retries: 30
+    networks: [isolated]
+  checks:
+    build:
+      context: .
+      dockerfile: backend/tests/Dockerfile.validation
+    environment:
+      PYTHON_DOTENV_DISABLED: "1"
+      APP_ENV: development
+      DATABASE_URL: postgresql://brasper_test:synthetic-local-test-only@postgres:5432/brasper_test_ia
+      REDIS_URL: redis://redis:6379/15
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    networks: [isolated]
+networks:
+  isolated:
+    internal: true

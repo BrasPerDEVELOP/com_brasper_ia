@@ -1,6 +1,18 @@
 # Plan de mejora: atención autónoma Brasper
 
-Fecha: 7 de octubre de 2026. Estado: **ejecutado en código (rama `chore/gate-single-tenant-ci`, sin despliegue)**; lo que depende de terceros o de aprobaciones de negocio queda marcado como **[externo]** en la sección "Estado de ejecución" al final y en [ATENCION-AUTONOMA-ETAPA-0.md](ATENCION-AUTONOMA-ETAPA-0.md).
+## Plan de ejecución actualizado — 8 de octubre de 2026
+
+El alcance se conserva, pero el trabajo se divide para poder entregar el desarrollo a una persona o agente sin esperar acceso a terceros:
+
+- **Código y pruebas locales:** [PLAN-CODIGO-PENDIENTE-2026-10.md](PLAN-CODIGO-PENDIENTE-2026-10.md). Lista vigente C1–C8 con archivos, orden y criterios de aceptación; incluye lo que falta en nuestra API de Brasper.
+- **Cuentas, contratos y pruebas externas:** [PLAN-DEPENDENCIAS-EXTERNAS-2026-10.md](PLAN-DEPENDENCIAS-EXTERNAS-2026-10.md). Meta, Coex real, Kommo, aprobaciones de contenido, modelo real y piloto.
+- **Prompt para entregar al desarrollador:** [PROMPT-AGENTE-CODIGO-2026-10.md](PROMPT-AGENTE-CODIGO-2026-10.md).
+
+Estas listas reemplazan los estados históricos de las secciones siguientes como guía de ejecución. Promociones, perfiles y biblioteca ya tienen implementación local; todavía necesitan los cierres y pruebas indicados. No están desplegados. Terminar el plan de código no equivale a haber validado las cuentas o la integración real de Coex.
+
+## Alcance original y antecedentes
+
+Fecha: 7 de octubre de 2026. Estado: **en implementación y auditoría; no terminado ni desplegado**. La sección «Estado de ejecución» es una fotografía anterior a las ampliaciones de promociones y agentes, no una certificación del alcance completo. Ver [AUDITORIA-ATENCION-AUTONOMA-2026-10.md](AUDITORIA-ATENCION-AUTONOMA-2026-10.md) para evidencia, trabajo pendiente y condiciones externas.
 
 ## Objetivo y alcance
 
@@ -227,3 +239,49 @@ Decisiones tomadas al ejecutar:
 - **Sin respuesta aprobada el bot no deriva automáticamente**: declara incertidumbre y ofrece asesor (deriva si el cliente lo pide). Evita colas por preguntas triviales y cumple "no inventar".
 - **SSE/tiempo real** sigue por polling incremental (ver plan del panel); no era requisito de este plan.
 - **Sin dependencias nuevas** en backend ni panel.
+
+## Promociones por historial del cliente (requisito añadido 2026-10-07)
+
+Observación directa, solo lectura, del editor Umbler `Brasper - Canal Principal`: existen opciones de primer envío en español y portugués, mensajes que anuncian una promoción de 25% y una imagen adjunta al mensaje español. El texto no establece sobre qué se aplica ese porcentaje. No se modificó ni guardó el flujo. No se confirmó en esta revisión una validación automática del historial de operaciones; seleccionar «primer envío» no acredita elegibilidad.
+
+Requisitos pendientes de implementación:
+- Distinguir contacto nuevo en el chat, cliente registrado y cliente con envíos completados. Consultar el historial autorizado de operaciones en la API de Brasper, vinculándolo a una identidad verificada. Un número nuevo o una conversación nueva no reinicia el beneficio.
+- Primer envío: ofrecer y aplicar la promoción únicamente cuando el sistema confirme la elegibilidad. Con historial desconocido o API indisponible, pedir verificación del asesor sin prometer el beneficio. Definir comercialmente qué operaciones cuentan, el tratamiento de cancelaciones y el momento en que se consume el beneficio.
+- Clientes recurrentes: permitir varias campañas configurables desde una vista Promociones del panel, con borrador, activación/desactivación, vigencia y zona horaria, segmento, dirección/monedas, mínimos/máximos, beneficio y base de cálculo, tope, usos por cliente, prioridad y compatibilidad entre campañas. La IA no crea ni modifica estos valores.
+- Vincular a cada campaña textos aprobados ES/PT e imágenes por idioma. Enviar la imagen junto con las condiciones relevantes solo después de resolver elegibilidad; no reenviarla en cada mensaje. Si falla el envío de imagen, conservar explicación en texto y registrar el fallo.
+- El backend calcula la promoción y devuelve su identificador, versión, elegibilidad, condiciones y cotización final. La IA comunica esa respuesta. Reservar/aplicar/consumir el beneficio de manera idempotente para evitar usos duplicados entre números, canales y conversaciones; registrar la decisión y gestionar vencimiento de cotizaciones.
+- La verificación del pago permanece humana. Recibir un comprobante no confirma el pago ni completa una operación. El comprobante final solo se comunica cuando el equipo o la API confirme su disponibilidad y el resultado real.
+- Validación fuera de producción: primer envío elegible, cliente recurrente, identidad sin verificar, historial inaccesible, beneficio ya usado, campañas vencidas o superpuestas, cambio de monto, dos chats simultáneos, imagen fallida y regresión Telegram. No activar campañas ni desplegar por esta incorporación al plan.
+
+Dependencias: contrato de consulta de cliente e historial de operaciones, reglas comerciales aprobadas (incluido el significado del 25% observado), catálogo de imágenes y endpoints de cálculo/aplicación del beneficio. Estado: planificado; no implementado por esta revisión.
+
+## Revisión de Umbler y atención conversacional (2026-10-07)
+
+Alcance: lectura de los siete editores listados, del único agente IA listado y sus pestañas Identidad/Comportamiento/Conocimiento/Habilidades/Flujo, y de configuraciones de atención (canales, atendentes, sectores, reparto, chats, espera, inactividad, horarios, etiquetas, grupos, campos, biblioteca, plantillas, respuestas rápidas, formularios, programación, variables, transferencia, privacidad, webhooks y atajos). No se guardaron cambios ni se ejecutó el agente. Los archivos fuente de conocimiento no se descargaron ni se leyó su contenido; algunas capacidades están bloqueadas por el plan Umbler. No se auditaron secretos API, facturación ni todas las opciones avanzadas anidadas. Leer el editor confirma configuración, no ejecución efectiva de todas las ramas.
+
+Hallazgos:
+- Siete flujos: Brasper, Brasper - Canal Principal, Brasper - original NO BORRAR, Fluxos de Braspito, Fluxo, Fluxos de Brasper, Brasper Redirecionamentos. Los primeros tres comparten menús ES/PT, operaciones, monto, primer envío y derivación. No se deben migrar las copias como siete comportamientos independientes.
+- Los auxiliares contienen encuesta de cinco respuestas, comentario adicional, despedida y recuperación por humano; redirecciones por petición de asesor, conocimiento insuficiente y límite de respuestas.
+- Un agente listado: Brasper, tipo Vendas/Expert, estado Ativo, idioma Português do Brasil, firma activada. Su base conectada Brasper Português tiene un DOCX, cero URLs y cero FAQ. Su única etapa explícita exige un saludo portugués fijo. Tiene automatizaciones por contenido inválido, límite, cierre, humano y respuesta no encontrada. No se verificó integración de operaciones en estas pestañas. La interfaz muestra cero créditos; no se probó el agente para determinar si puede responder actualmente.
+- Tres cuentas humanas listadas y un sector Braspito; la reasignación libera la conversación para otro atendente. Algunas ramas seleccionan al atendente Brasper específicamente. No inferir equidad de reparto por esta configuración.
+- Dos canales WhatsApp Starter online; un WhatsApp Business API con registro pendiente. No equiparar Starter con Cloud API o Coex. Formularios indica que no existe canal Business API activo. Las listas de respuestas rápidas y templates están vacías.
+- Una etiqueta Cliente novo y dos archivos en la biblioteca visible. Horarios, espera, inactividad, grupos organizativos, campos personalizados, variables, privacidad, webhooks y atajos muestran bloqueo por plan. «Grupos» aquí es organización de recursos, no prueba de soporte de grupos WhatsApp por API.
+
+Decisión de producto: atención libre por IA, sin exigir menús numerados ni un constructor visual de flujos. Conservar estado interno, herramientas autorizadas y confirmaciones de operación; permitir corregir monto/destino, cambiar de intención y retomar sin repetir datos.
+
+Trabajo adicional pendiente:
+1. Perfiles de agente versionados: nombre de asistente, presentación transparente como IA, tono, longitud, emojis, idiomas, canal/número, conocimiento y herramientas permitidas. El panel ya tiene system_prompt; falta una vista estructurada para perfiles y selección consistente por conversación. Empezar con un perfil Brasper bilingüe y estilos para orientación inicial, atención recurrente y soporte; no cambiar personalidad abruptamente ni simular personas humanas. Estilo nunca altera promociones, tasas ni permisos.
+2. Biblioteca de medios aprobados vinculada a campañas, idioma y propósito (promoción, instrucciones, cuentas oficiales). Vista previa, activación, versión y registro de envío; separar material comercial del comprobante específico de una operación. La capacidad técnica de enviar imágenes ya existe; falta la selección autónoma autorizada.
+3. Encuesta breve opcional al finalizar atención, ES/PT, sin envío repetido; registrar satisfacción y comentario, detectar reclamos, ofrecer continuación humana con resumen. No finalizar una operación pendiente por cerrar un chat.
+4. Seguimiento de espera/inactividad con horario y zona horaria del equipo, aviso honesto, SLA/escalamiento, recordatorios limitados y reanudación del contexto. Respetar consentimiento y reglas del canal; verificar ventana/template vigente mediante contrato Meta antes de activar mensajes proactivos. La vista de plantillas existe en nuestro repo, pero listar nombres no acredita aprobación Meta ni entrega real.
+5. Completar conocimiento ES/PT desde fuentes aprobadas, separando FAQ estables de datos financieros en vivo. No copiar el saludo fijo portugués a clientes que escriben español; no derivar automáticamente preguntas triviales por una FAQ faltante.
+6. Revisar roles, permisos por canal/sector, disponibilidad y cola, y asegurar pausa inmediata de IA al intervenir el humano. La base de presencia/handoff ya está en el repo; validar comportamiento con la versión desplegada antes de sustituir Umbler.
+7. Pruebas conversacionales fuera de producción para promociones, imágenes, perfiles, cambios de intención, reclamos, recuperación de espera y Telegram; comparar con conversaciones reales anonimizadas. Migrar por piloto reversible, no dar por cubierta toda la plataforma por esta inspección.
+
+Estado: estos requisitos adicionales son planificación, no implementación ni despliegue. La verificación de pago permanece humana.
+
+### Aclaración comercial confirmada por el usuario
+
+Las promociones se comportan como los cupones de Brasper: descuento configurable entre 0% y 100% sobre la comisión. El primer envío observado usa 25%; los beneficios de recurrentes dependen de la campaña configurada y activada, sin asumir otro porcentaje. Reutilizar las reglas y validaciones de la API oficial de Brasper. El porcentaje no se aplica al capital enviado ni al tipo de cambio. Vigencia, límites y elegibilidad deben ser explícitos en cada campaña.
+
+Confirmación del usuario (2026-10-08, Lima): para primer envío cuentan las operaciones completadas. Una operación pendiente reserva el beneficio; si falla o se cancela, se libera. Implementar esta regla en la autoridad financiera, con concurrencia entre canales y números. Consultar el historial para decidir elegibilidad no equivale a reservar o consumir el beneficio.
