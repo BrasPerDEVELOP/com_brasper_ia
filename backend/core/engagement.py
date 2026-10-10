@@ -115,6 +115,8 @@ def record_consent(cid, text):
 
 
 def schedule(cid, kind, now=None):
+    from .lease import guard
+    guard()
     settings = Settings(**configuration()["settings"])
     conv = db.get_conversation(cid)
     if not settings.enabled or not conv or kind not in {"survey", "waiting", "inactivity"}:

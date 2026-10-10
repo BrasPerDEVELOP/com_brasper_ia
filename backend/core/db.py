@@ -439,6 +439,12 @@ def _rowdict(row: Any) -> dict:
     return dict(row) if row is not None else {}
 
 
+def _lease_guard() -> None:
+    """Escrituras del procesamiento de un mensaje solo con el lease vigente (core.lease)."""
+    from .lease import guard  # noqa: PLC0415 - lease importa redis_runtime, no db
+    guard()
+
+
 def get_or_create_conversation(*args, conversation_id: str | None = None, connection_id: str | None = None) -> str:
     """Obtiene/crea conversación.
 
@@ -538,6 +544,7 @@ def add_message(*args, media: dict | None = None, sender: str | None = None,
     """Guarda un mensaje. `sender` distingue quién habla del lado Brasper:
     'user' (cliente), 'bot' (IA/flujos deterministas) o 'agent' (asesor humano).
     Si no se indica, se deduce del role (user→user, assistant→bot)."""
+    _lease_guard()
     if len(args) == 4:
         tenant_id, conversation_id, role, content = args
     elif len(args) == 3:
@@ -586,6 +593,7 @@ def get_history(*args, limit: int = 12) -> list[dict]:
 
 
 def set_conversation_status(*args) -> None:
+    _lease_guard()
     if len(args) == 3:
         tenant_id, conversation_id, status = args
     elif len(args) == 2:
@@ -661,6 +669,7 @@ def merge_lead_data(*args, allow_null: bool = False) -> dict:
     """Fusiona campos del lead (idioma, ruta, monto, KYC…) sin pisar lo ya guardado
     con valores vacíos. allow_null permite invalidar explícitamente un dato
     anterior cuando su fuente deja de estar disponible."""
+    _lease_guard()
     if len(args) == 3:
         tenant_id, conversation_id, updates = args
     elif len(args) == 2:
@@ -689,6 +698,7 @@ def conversation_status(*args) -> str | None:
 
 
 def assign_conversation(*args) -> None:
+    _lease_guard()
     if len(args) == 3:
         tenant_id, conversation_id, email = args
     elif len(args) == 2:
@@ -708,6 +718,7 @@ def assign_conversation(*args) -> None:
 def claim_conversation(conversation_id: str, email: str) -> bool:
     """Asignación con protección de concurrencia: solo si está libre o ya es del mismo
     asesor. Devuelve False si otro asesor la tiene (409 en la API)."""
+    _lease_guard()
     with connect() as con:
         cur = con.execute(
             "UPDATE conversations SET assigned_to=?, updated_at=? "

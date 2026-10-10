@@ -64,6 +64,7 @@ def lock_checks():
     assert other and not redis_runtime.still_held("r1:lease", token)
 
     _long_processing_checks()
+    _blocking_write_after_loss_checks()
 
 
 def _long_processing_checks():
@@ -134,3 +135,65 @@ def _long_processing_checks():
     assert "done" not in finished, "el trabajo no continúa tras perder la exclusión"
     # La conversación queda libre para el siguiente mensaje.
     assert redis_runtime.acquire_lock(redis_runtime.key("lock", "conversation", "webchat", cid), wait_seconds=0.5)
+
+
+def _blocking_write_after_loss_checks():
+    """Revisión 10 oct: perder el lease durante un nodo síncrono o un hilo de herramienta no
+    debe permitir escrituras posteriores; otro worker recupera la conversación."""
+    import time
+    from core import agent_graph, tool_contracts
+
+    def run(coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    cid = db.get_or_create_conversation("lease-sync", "webchat")
+
+    def contents():
+        return [m["content"] for m in db.get_messages(cid)]
+
+    # 1) Nodo síncrono que bloquea más que el TTL y después escribe (efecto sintético).
+    async def blocking_then_write(user_ref, text, channel, conversation_id, user_media=None, link_token=None):
+        time.sleep(0.35)
+        db.add_message(cid, "assistant", "efecto-sintetico-tras-perder-lease")
+        return {"conversation_id": cid}
+
+    with patch.object(engine, "LOCK_TTL_SECONDS", 0.15),          patch.object(agent_graph, "handle_message", blocking_then_write),          patch.object(redis_runtime, "renew_lock", return_value=False):
+        try:
+            run(engine.handle_message("lease-sync", "hola", conversation_id=cid))
+            raise AssertionError("debía rechazarse al perder el lease")
+        except engine.ConversationBusyError:
+            pass
+    assert "efecto-sintetico-tras-perder-lease" not in contents()
+
+    # 2) Herramienta en hilo: la escritura local del hilo tras la pérdida tampoco ocurre, y no se
+    #    inicia una escritura externa nueva sin exclusión.
+    started = {}
+
+    def tool_body(lead):
+        started["tool"] = True
+        time.sleep(0.35)
+        db.merge_lead_data(cid, {"efecto": "hilo-tras-perder-lease"})
+        return {"ok": True}
+
+    async def node_with_tool(user_ref, text, channel, conversation_id, user_media=None, link_token=None):
+        tool_contracts.run("client.upsert", {"lead": {"x": 1}}, tool_body)
+        tool_contracts.run("client.upsert", {"lead": {"x": 2}}, lambda lead: started.setdefault("second", True))
+        return {"conversation_id": cid}
+
+    with patch.object(engine, "LOCK_TTL_SECONDS", 0.15),          patch.object(agent_graph, "handle_message", node_with_tool),          patch.object(redis_runtime, "renew_lock", return_value=False):
+        try:
+            run(engine.handle_message("lease-sync", "hola", conversation_id=cid))
+        except engine.ConversationBusyError:
+            pass
+    time.sleep(0.5)  # el hilo de la herramienta termina su espera
+    assert started.get("tool") and "second" not in started, started
+    assert db.get_lead_data(cid).get("efecto") is None
+
+    # 3) Recuperación: otro worker procesa normalmente la conversación liberada.
+    out = run(engine.handle_message("lease-sync", "hola de nuevo", conversation_id=cid))
+    assert out["response"] and not out["paused"]
+

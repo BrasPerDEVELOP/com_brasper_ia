@@ -7,10 +7,34 @@ respuesta nunca se entrega sin propiedad vigente.
 """
 from __future__ import annotations
 
+import contextvars
 import threading
 from typing import Callable
 
 from . import observability, redis_runtime
+
+_active: contextvars.ContextVar["Lease | None"] = contextvars.ContextVar("conversation_lease", default=None)
+
+
+class LeaseLost(BaseException):
+    """Se perdió la exclusión de la conversación. Hereda de BaseException para que un
+    `except Exception` de un nodo o herramienta no la trague y siga escribiendo."""
+
+
+def guard() -> None:
+    """Llamar justo antes de cada escritura del procesamiento de un mensaje. Sin lease
+    activo (panel, worker de seguimiento, scripts) no hace nada."""
+    lease = _active.get()
+    if lease is not None and lease.lost:
+        raise LeaseLost(lease.name)
+
+
+def activate(lease: "Lease"):
+    return _active.set(lease)
+
+
+def deactivate(token) -> None:
+    _active.reset(token)
 
 
 class Lease:

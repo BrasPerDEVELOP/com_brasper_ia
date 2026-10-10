@@ -60,6 +60,8 @@ async def deliver(out: dict, channel: str, recipient: str, send: Callable[[], Aw
                   connection_id: str | None = None, kind: str = "text", text: str = "") -> dict:
     """Envía si sigue autorizado JUSTO antes de llamar al proveedor y registra el resultado."""
     from . import engine
+    from .lease import guard
+    guard()  # sin exclusión vigente no se inicia un envío automático
     oid = uuid.uuid4().hex
     now = util.now_iso()
     with db.connect() as con:

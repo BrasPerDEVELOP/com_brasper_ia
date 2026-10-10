@@ -10,6 +10,7 @@ resultado guardado sin repetir la acción.
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -134,6 +135,11 @@ def run(name: str, inputs: dict, fn: Callable[..., Any], *, idempotency_key: str
     if err:
         observability.event("tool.validation_error", tool=name, detail=err)
         return {"ok": False, "error_code": "validation", "detail": err}
+    if c.write:
+        # Una escritura externa no se inicia sin exclusión vigente. Si ya está en curso cuando
+        # se pierde el lease, no se cancela a ciegas: el resultado se registra (incierto/tardío).
+        from .lease import guard
+        guard()
     if c.write and idempotency_key:
         prev = idempotency.recall(idempotency_key)
         if prev is not None:
@@ -162,7 +168,9 @@ def run(name: str, inputs: dict, fn: Callable[..., Any], *, idempotency_key: str
         return result
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    fut = pool.submit(execute)
+    # El hilo hereda el contexto (lease activo): las escrituras locales del propio hilo
+    # también se comprueban.
+    fut = pool.submit(contextvars.copy_context().run, execute)
     try:
         return fut.result(timeout=c.timeout)
     except concurrent.futures.TimeoutError:

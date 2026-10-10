@@ -51,16 +51,23 @@ async def handle_message(user_ref: str, text: str,
     token = redis_runtime.acquire_lock(lock_name, ttl_seconds=LOCK_TTL_SECONDS, wait_seconds=2)
     if not token:
         raise ConversationBusyError("Conversacion ocupada; intenta de nuevo en unos segundos")
+    from .lease import LeaseLost, activate, deactivate
     loop = asyncio.get_running_loop()
-    task = asyncio.ensure_future(_process(user_ref, text, channel, conversation_id, user_media))
-    # Si la renovación falla, el trabajo se cancela en su siguiente punto de espera: no sigue
-    # escribiendo ni genera respuesta sin exclusión vigente.
-    lease = Lease(lock_name, token, LOCK_TTL_SECONDS,
-                  on_lost=lambda: loop.call_soon_threadsafe(task.cancel)).start()
+    lease = Lease(lock_name, token, LOCK_TTL_SECONDS)
+    # El lease viaja en el contexto: la tarea y los hilos de herramientas lo heredan y cada
+    # escritura lo comprueba (lease.guard). Un nodo síncrono que siga corriendo tras perderlo
+    # no puede escribir; la cancelación cubre además los puntos de espera asíncronos.
+    ctx_token = activate(lease)
+    try:
+        task = asyncio.ensure_future(_process(user_ref, text, channel, conversation_id, user_media))
+    finally:
+        deactivate(ctx_token)
+    lease.on_lost = lambda: loop.call_soon_threadsafe(task.cancel)
+    lease.start()
     try:
         try:
             out = await task
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, LeaseLost):
             if lease.lost:
                 raise ConversationBusyError("Se perdió la exclusión de la conversación; no se responde")
             raise
