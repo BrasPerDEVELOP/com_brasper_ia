@@ -1,8 +1,6 @@
 # Plan ejecutable de código pendiente — Brasper IA
 
-Actualizado: 9 de octubre de 2026 (Lima). Responsable: una persona o agente de desarrollo. Estado: implementación local completa en C1–C8; R1/R2 y el lease sin renovación de las revisiones corregidos. Siguen pendientes validaciones de infraestructura real (PostgreSQL 16 multisesión, psycopg, Redis) y la prueba de UI del portal de punta a punta. No desplegado.
-
-Revisión vigente: [REVISION-CODIGO-2026-10-09.md](REVISION-CODIGO-2026-10-09.md). Se reprodujeron fallos de exclusión al caer el respaldo de locks y redacción incompleta ante varios códigos de vinculación. Pruebas nuevas: 74 checks, 57 evals, 391 tests API y TypeScript aprobados. El registro de cierre posterior es histórico y no certifica resueltos estos hallazgos ni la infraestructura real pendiente. Actualización 9 oct (tarde): R1 y R2 corregidos con regresiones (checks 70 y 75: 75/75); evals 57/57; E2E API↔bot 47/47 y 42/42. Ver la respuesta en la revisión.
+Actualizado: 10 de octubre de 2026 (Lima). Estado: **código local implementado en C1–C8 y corregidos todos los hallazgos de las dos revisiones** (R1, R2 y lease). **Pendiente:** validación en infraestructura real, UI del portal de punta a punta, ensayo de migración con históricos y reglas comerciales C1. Commits locales sin push; no desplegado. Ver [Estado actual](#estado-actual--10-de-octubre-de-2026).
 
 Este documento es la lista de ejecución actual para terminar el trabajo que no necesita cuentas, aprobaciones ni tráfico de terceros. Sustituye como lista de pendientes de código a las tablas históricas del [plan original](PLAN-ATENCION-AUTONOMA-2026-10.md), conservando su alcance. Las dependencias externas están en [otro plan](PLAN-DEPENDENCIAS-EXTERNAS-2026-10.md). Prompt de entrega: [PROMPT-AGENTE-CODIGO-2026-10.md](PROMPT-AGENTE-CODIGO-2026-10.md).
 
@@ -27,7 +25,7 @@ No empezar otra implementación paralela de promociones, perfiles o biblioteca: 
 
 ### Lista vigente para ejecutar, sin rehacer lo existente
 
-Todas las filas siguen abiertas hasta reunir su evidencia. Las secciones C1–C8 posteriores detallan el alcance y sus criterios; algunas tareas ya tienen implementación parcial.
+Alcance original de cada fila. Su estado y evidencia están en [Estado actual](#estado-actual--10-de-octubre-de-2026); las secciones C1–C8 detallan alcance y criterios de aceptación.
 
 | Orden | Pendiente de código | Entrega necesaria para cerrarlo |
 |---|---|---|
@@ -134,64 +132,52 @@ El trabajo local se cierra cuando C1–C8 tienen implementación y evidencia apl
 
 La entrega debe incluir resumen de cambios, pruebas ejecutadas, fallos o límites, instrucciones reproducibles y pendientes externos concretos. No publicar, desplegar, activar ni afirmar compatibilidad real con Meta. El plan completo del producto solo se cierra después del plan externo y el piloto autorizado.
 
-## Avance verificado — 9 de octubre de 2026
+## Estado actual — 10 de octubre de 2026
 
-Este registro sustituye los conteos históricos anteriores; no declara cerrado C1–C8.
+Repos y commits locales (sin push, sin despliegue; producción y Meta no se tocaron; datos de prueba sintéticos):
 
-- API: 105 pruebas seleccionadas aprobadas (campañas, comisiones, cupones, transacciones, identidad y contratos privados). La selección de comisión ahora es compartida por cotización y registro; los huecos internos sin comisión se rechazan.
-- Bot: última ejecución registrada 69/69 checks; 54/54 escenarios deterministas y doctests anteriores al último lote. TypeScript aprobado; falta repetir build y evaluar las últimas pantallas.
-- SQLite: migración con datos sintéticos históricos 0006 → 0009, repetición y copia/restauración aprobadas. No acredita las migraciones financieras 083/084 de PostgreSQL.
-- Vinculación segura: API local emite códigos de un uso de cinco minutos desde la sesión del cliente; grants de treinta minutos vinculados a cliente/canal/referencia, guardados como hashes. Consulta privada de operaciones exige grant válido e integración. Flag BRASPER_IA_IDENTITY_LINK_ENABLED desactivado por defecto. Falta portal para emitir, integración del bot, almacenamiento privado del grant y pruebas de concurrencia real: C2 sigue parcial.
-- Documentos: se evita guardar una respuesta antigua sobre otra selección; hay control de cambios sin guardar. Medios limitados a 20 MiB durante descarga, origen WhatsApp validado y caché privada descartada al cerrar sesión.
-- PostgreSQL/Redis: runner aislado preparado en docker-compose.validation.yml. No ejecutado; equipo sin Docker/WSL y Windows bloquea los binarios descargados. No se modificó esa protección.
+| Repo | Rama | Commits |
+|---|---|---|
+| `com_brasper_ia` | `chore/gate-single-tenant-ci` | 30c5d8a backend · 04cc4f9 panel · 50dd84b y 9c7e062 docs |
+| `com_brasper_api` | `feat/ia-campanas-identidad` | c750b6a campañas/identidad/C1/login · 8fdf8d3 laboratorio PGlite |
+| `com_brasper_www` | `feat/vincular-chat` | 50305d0 vinculación de chat |
 
-Pendientes locales principales: identidad de extremo a extremo; contactos y alias canónicos; sincronización Coex/reconciliación; permisos por canal/sector; carreras de entrega y caída de Redis; validación PostgreSQL/Redis, migraciones financieras, build y comprobación de pantallas. Los requisitos externos permanecen en el plan separado. Producción no fue modificada durante este avance.
-
-## Cierre de código — 9 de octubre de 2026 (tarde)
-
-Trabajo hecho en `com_brasper_ia`, `com_brasper_api` y `com_brasper_www` (portal de clientes, necesario para emitir la vinculación). Sin despliegue, sin tocar producción ni Meta. Commits locales (sin push): `com_brasper_ia` 30c5d8a/04cc4f9/50dd84b en `chore/gate-single-tenant-ci`; `com_brasper_api` c750b6a/8fdf8d3 en `feat/ia-campanas-identidad`; `com_brasper_www` 50305d0 en `feat/vincular-chat`. Todos los datos de prueba son sintéticos.
+### Estado por fila
 
 | Fila | Estado | Evidencia |
 |---|---|---|
-| 1 — C2 identidad | Hecho | Bot: `core/identity_link.py` (token por `/start`/`vincular`, redactado antes de guardar y del LLM; grant Fernet en `identity_grants`; canje idempotente sin repetir escrituras tras timeout), `operation_status` con grant, flag `identity_link`. API: revocación `DELETE /brasper/identity-links`, rutas en el inventario de auditoría, `grant` redactado. Portal: `/vincular-chat` → `/dashboard/vincular-chat`. Cuenta de servicio del bot (JWT + secreto) para `AUTH_REQUIRED=true`. Checks 70 y 74; E2E real API↔bot sobre PGlite 47/47 con `AUTH_REQUIRED=true` y 42/42 sin ella (login deshabilitado y fuga de errores en `/auth/login` corregidos en la API): ver [evidencia](EVIDENCIA-PGLITE-2026-10-09.md#e2e-vinculación-de-identidad-c2). |
-| 2 — C1 financiero | Hecho salvo concurrencia real | [Auditoría C1](AUDITORIA-C1-FINANCIERA-2026-10-09.md): 5 bugs corregidos (comisión distinta entre cotización y registro, cupón sin reserva, ediciones sin lock del cliente, `max_uses` < usados, borrado de campaña versionada). Migración 083 corregida (DROP INDEX sin `IF EXISTS` dejaba la base a medio migrar). 083/084 con datos, repetición, downgrade y backup/restore en PGlite: [evidencia](EVIDENCIA-PGLITE-2026-10-09.md). |
-| 3 — C5 contactos | Hecho | `core/contacts.py` (alias por proveedor/conexión, teléfono solo si el canal lo entrega, conflictos sin fusión, backfill idempotente), lock de creación de conversación, lock en base si Redis cae (`core/db_lock.py`). Check 71. |
-| 4 — C5 sincronización | Hecho con interfaz; mapeo Meta externo | `core/outbound.py` (enviado/cancelado/incierto/fallido; estados que solo avanzan), `core/channel_events.py` (history/state_sync guardados para replay; ecos en vuelo diferidos y resueltos por id; barrido tras caída), `core/coex.py`. Check 72. |
-| 5 — C3/C4 | Hecho | Jobs reclamados y caídos → incierto (nunca se reenvían); pregunta durante la encuesta vuelve al chat; consentimiento con puntuación; «¿ya llegó mi envío PxB-77?» ya no se cotiza. Checks 67, 65; evals 57/57. |
-| 6 — C6/C7 permisos | Hecho | `core/access.py`: alcance por canal/número/sector en bandeja, detalle, adjuntos, respuestas, asignación y derivación automática; comprobantes con `media:private`; un asesor ya no reasigna conversaciones ajenas. Panel `/accesos` y avisos de envíos sin confirmar en la ficha. Check 73; revisión visual local autenticada. |
-| 7 — C8 validación | Parcial: falta infraestructura real | Ver comandos abajo. Migraciones del bot 0001→0011 en PGlite ([evidencia](EVIDENCIA-PGLITE-BOT-2026-10-09.md)); 0009 ahora renumera versiones duplicadas de documentos y 0011 corrige `tenant_id NOT NULL` que rompía citas y rotación de secretos. |
+| 1 — C2 identidad | Implementado; falta UI del portal de punta a punta | Bot `core/identity_link.py`: token por `/start`/`vincular`, todos los códigos redactados antes de guardar y del LLM (varios códigos → ninguno se canjea), grant Fernet por chat, canje idempotente sin repetir escrituras tras timeout; `operation_status` con grant; flag `identity_link`. Cuenta de servicio del bot (JWT + secreto, re-login único, backoff). API: emisión, canje, revocación, consulta privada; login sin sesión para cuentas deshabilitadas y sin fuga de errores. Portal `/vincular-chat`. Checks 70 y 74; E2E API↔bot sobre PGlite 47/47 (`AUTH_REQUIRED=1`) y 42/42 (`0`) con sesión de portal simulada: [evidencia](EVIDENCIA-PGLITE-2026-10-09.md#e2e-vinculación-de-identidad-c2). |
+| 2 — C1 financiero | Implementado; falta concurrencia en PostgreSQL real y reglas comerciales | [Auditoría C1](AUDITORIA-C1-FINANCIERA-2026-10-09.md): 5 bugs corregidos. Migración 083 corregida (`DROP INDEX IF EXISTS` al inicio). 083/084 con datos, repetición, downgrade y backup/restore en PGlite: [evidencia](EVIDENCIA-PGLITE-2026-10-09.md). |
+| 3 — C5 contactos | Implementado | `core/contacts.py` (alias por proveedor/conexión, teléfono solo si el canal lo entrega, conflictos sin fusión, backfill), creación de conversación serializada. Check 71. |
+| 4 — C5 sincronización y exclusión | Implementado; mapeo Meta en el plan externo | `core/outbound.py` (enviado/cancelado/incierto/fallido), `core/channel_events.py` (replay de sync, ecos en vuelo diferidos), `core/coex.py`. Lock común en base con Redis opcional; sin base no se procesa; lease renovado cada TTL/3 en hilo propio y trabajo cancelado si se pierde (`core/lease.py`, `core/db_lock.py`). Checks 72 y 75 (incluye dos workers con procesamiento mayor que el TTL y control negativo). |
+| 5 — C3/C4 | Implementado | Jobs reclamados y caídos → incierto; pregunta durante la encuesta vuelve al chat; consentimiento con puntuación; referencia de operación no se cotiza. Checks 65, 67; evals 57/57. |
+| 6 — C6/C7 permisos | Implementado; falta revisión por roles con Lighthouse | `core/access.py`: alcance por canal/número/sector en bandeja, detalle, adjuntos, respuestas, asignación y derivación; comprobantes con `media:private`; un asesor no reasigna conversaciones ajenas. Panel `/accesos` y envíos sin confirmar en la ficha (revisión visual local como owner). Check 73. |
+| 7 — C8 validación | Parcial | Suites locales y PGlite completas (abajo). Migraciones del bot 0001→0011 en PGlite: [evidencia](EVIDENCIA-PGLITE-BOT-2026-10-09.md); 0009 renumera documentos duplicados, 0011 corrige `tenant_id NOT NULL`. Falta infraestructura real. |
 
-Comandos y resultados (Windows, 9 oct):
+### Pruebas (últimas ejecuciones, 9–10 oct)
 
 - Bot, desde `backend/`: `..\.venv\Scripts\python.exe tests\run_checks.py` → 75/75; `tests\evals\run.py` → 57/57; `python -m doctest core/policies.py` → OK; `tests\sqlite_migration_checks.py` → 0006→0011 con datos, repetición y backup/restore.
 - API: `.venv\Scripts\python.exe -m pytest -q tests` → 391 passed.
 - Panel: `npx tsc --noEmit` y `npx next build` → OK. Portal: `vue-tsc --noEmit` y `vite build` → OK.
-- PostgreSQL: PGlite (PostgreSQL 18.3 en WASM) vía asyncpg con los runners `com_brasper_api/scripts/validate_migrations_pglite.py` y `backend/tests/pglite_migrations.py`.
+- PostgreSQL 18.3 en WASM (PGlite) vía asyncpg: `com_brasper_api/scripts/validate_migrations_pglite.py`, `backend/tests/pglite_migrations.py` y `com_brasper_api/scripts/e2e_identity_link_driver.py --auth-required 0|1`.
 
-Límites que siguen abiertos (infraestructura local, no cuentas externas):
+### Pendiente
 
-- PGlite es una sola sesión: no prueba bloqueos entre transacciones simultáneas (reservas de cupón, advisory lock, `FOR UPDATE`). Ensayo pendiente en PostgreSQL 16 real con Docker o servidor autorizado, usando `docker-compose.validation.yml`.
-- El driver del bot en runtime (psycopg) y Redis real no se pudieron ejecutar en este equipo (App Control).
-- Antes de migrar producción: comprobar ids de conversación repetidos entre tenants (riesgo de 0007) y el índice de 083 con las consultas de las evidencias.
-- Reglas comerciales pendientes señaladas por la auditoría C1 (reversión completada→fallida, `quote_id` firmado, redondeo).
+Ninguno se resuelve con más código en este equipo (sin Docker; App Control bloquea PostgreSQL nativo, psycopg y Redis):
 
-Los requisitos de Meta (contrato Coex/BSUID real), FAQ comercial, textos legales y piloto siguen en el [plan externo](PLAN-DEPENDENCIAS-EXTERNAS-2026-10.md).
+1. **Infraestructura real:** PostgreSQL 16 con varias sesiones y el driver psycopg del bot; Redis real con caídas y recuperación; concurrencia financiera (dos operaciones simultáneas no consumen dos primeros beneficios) y emisión/canje simultáneos. Entorno listo: `docker-compose.validation.yml` y [guía](VALIDACION-INFRA-LOCAL.md).
+2. **UI de punta a punta:** portal autenticado → vincular → consulta en el chat (otro cliente, vencimiento, revocación, errores); panel con distintos roles; Lighthouse de las pantallas pertinentes.
+3. **Migración con históricos representativos:** ids de conversación repetidos entre tenants (0007 fallaría), índice de 083, backup/restore y rollback de flags. Consultas de verificación en las evidencias.
+4. **Reglas comerciales C1 (decisión del negocio):** reversión completada→fallida, operaciones sin cupón reasignadas o reactivadas, conservación del descuento cotizado hasta el registro, redondeo.
+5. **Configuración de despliegue:** cuenta de servicio de la API (`BRASPER_IA_SERVICE_USERNAME`/`PASSWORD`, usuario alfanumérico o email), `BRASPER_IA_GRANT_KEY`, `quote.api.identity_link_url`, `VITE_TELEGRAM_BOT_USERNAME`; flags `identity_link`, `operation_status` y `campaigns` siguen en `false` hasta validar. Ver RUNBOOK §9.5–9.8.
 
+Límite conocido: una escritura síncrona ya en curso cuando se pierde el lease no se interrumpe (solo si la base no responde durante más de un TTL).
 
-## Segunda revisión independiente — 9 de octubre de 2026
+Meta (contrato Coex/BSUID real), FAQ comercial, textos legales, publicación y piloto siguen en el [plan externo](PLAN-DEPENDENCIAS-EXTERNAS-2026-10.md).
 
-R1 básico y R2 confirmados corregidos con reproducciones sintéticas: fallo de adquisición en BD devuelve None; dos códigos quedan redactados y no se canjea ninguno. Suite completa del bot repetida con dotenv deshabilitado: 75/75 aprobados. No se repitieron API, evals, UI, build o infraestructura; sus resultados anteriores no son ejecuciones nuevas.
+### Historial de revisiones
 
-Pendiente de código C5: el lease del engine es de 45 segundos, sin renovación, y still_held se comprueba al terminar el grafo. Esa comprobación bloquea la entrega, pero no cancela trabajo ni impide escrituras anteriores. El cliente LLM admite timeout de 60 segundos. Debe probarse procesamiento superior a 45 segundos con dos workers y resolver la exclusión durante toda la operación mediante renovación/propiedad o un mecanismo equivalente. El solapamiento real no se reprodujo en esta revisión: es un riesgo identificado por inspección, no una concurrencia aprobada.
-
-Siguen pendientes PostgreSQL 16 multisesión, psycopg/Redis reales, migraciones/backup con históricos representativos, UI del portal autenticado de punta a punta, validación del panel por roles/Lighthouse y brechas financieras C1. No declarar C1–C8 completamente cerrados con esa evidencia pendiente. Meta/Coex reales permanecen en el plan externo. No se modificó producción ni implementación en esta revisión.
-
-### Estado tras la segunda revisión — 10 de octubre de 2026
-
-- **Lease (C5): resuelto** en el commit 30c5d8a. `core/lease.py` renueva el lease cada TTL/3 en un hilo propio; `engine` procesa bajo el lease y cancela el trabajo si la renovación falla. Check 75: dos workers con procesamiento mayor que el TTL (asíncrono y bloqueante) no se solapan; control negativo sin renovación falla. Detalle en [la revisión](REVISION-CODIGO-2026-10-09.md#respuesta-a-la-segunda-revisión--lease-renovado-9-oct). Límite: una escritura síncrona ya en curso no se interrumpe (solo si la base no responde más de un TTL).
-- **Siguen pendientes** (requieren infraestructura o decisiones, no más código en este equipo):
-  1. PostgreSQL 16 multisesión con el driver psycopg del bot, Redis real, caídas/recuperación y concurrencia financiera (`docker-compose.validation.yml`).
-  2. UI del portal autenticado de punta a punta (login → vincular → consulta en chat) y panel por roles con Lighthouse.
-  3. Ensayo de migración con históricos representativos (ids repetidos entre tenants para 0007, índice de 083, backup/restore).
-  4. Reglas comerciales C1: reversión completada→fallida, operaciones sin cupón reasignadas/reactivadas, conservación del descuento cotizado, redondeo.
-
+- 9 oct, mañana: 69/69 checks bot, 105 tests API seleccionados; C2 parcial (sin portal ni integración del bot).
+- 9 oct, tarde: implementación C1–C8, auditoría C1 y evidencias PGlite.
+- [Revisión 1](REVISION-CODIGO-2026-10-09.md): R1 (procesar sin lock si fallaba la base) y R2 (segundo código sin redactar) → corregidos, checks 70 y 75.
+- Revisión 2: lease de 45 s sin renovación → corregido con renovación en hilo propio y cancelación; check 75 con dos workers y control negativo.
