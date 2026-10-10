@@ -258,8 +258,12 @@ def ensure_seed() -> None:
             # (por token o por email: un token demo rotado no debe dejar la cuenta viva).
             tph = ",".join("?" * len(_DEMO_TOKENS))
             eph = ",".join("?" * len(_DEMO_EMAILS))
-            con.execute(f"DELETE FROM panel_users WHERE token IN ({tph}) OR email IN ({eph})",
-                        (*_DEMO_TOKENS, *_DEMO_EMAILS))
+            # Un correo demo puede ser el owner real configurado en el servidor.
+            # Conservarlo si su token es propio; los tokens demo nunca se admiten.
+            configured_admin = normalize_email(os.getenv("PANEL_ADMIN_EMAIL")) or ""
+            con.execute(f"DELETE FROM panel_users WHERE token IN ({tph}) OR "
+                        f"(email IN ({eph}) AND email != ?)",
+                        (*_DEMO_TOKENS, *_DEMO_EMAILS, configured_admin))
         if seed_demo:
             if db.is_postgres():
                 con.executemany(

@@ -254,6 +254,23 @@ def user_checks(client, owner_headers):
         with db.connect() as con:
             con.execute("UPDATE panel_users SET active=0, token=? WHERE email='legado@test'", (auth._disabled_token(),))
 
+    # El owner configurado puede reutilizar un correo demo con credenciales propias.
+    configured = "configured-demo-name@test"
+    with patch.dict(os.environ, {"PANEL_ADMIN_EMAIL": configured,
+                                 "PANEL_ADMIN_TOKEN": "private-configured-owner-token",
+                                 "SEED_DEMO_USERS": "false"}), \
+            patch.object(auth, "_is_production", return_value=True), \
+            patch.object(auth, "_DEMO_EMAILS", (configured, "unused-demo@test")), \
+            patch.object(auth, "_DEMO_TOKENS", ("test-public-demo",)):
+        auth.create_user("unused-demo@test", "Demo", "agent", token="rotated-demo-token")
+        auth.ensure_seed()
+        auth.ensure_seed()
+        assert auth.user_from_token("private-configured-owner-token")["role"] == "owner"
+        assert auth.user_from_email("unused-demo@test") is None
+        os.environ["PANEL_ADMIN_TOKEN"] = "test-public-demo"
+        auth.ensure_seed()
+        assert auth.user_from_email(configured) is None, "un token demo nunca se conserva"
+
     # 11) Intentos fallidos: auditados sin secretos y limitados por IP.
     rate_limit._BUCKETS.clear()
     codes = [client.post("/api/login", json={"email": "nadie@test", "password": "x" * 12}).status_code
