@@ -149,7 +149,7 @@ Pendientes locales principales: identidad de extremo a extremo; contactos y alia
 
 ## Cierre de código — 9 de octubre de 2026 (tarde)
 
-Trabajo hecho en `com_brasper_ia`, `com_brasper_api` y `com_brasper_www` (portal de clientes, necesario para emitir la vinculación). Sin commits, sin despliegue, sin tocar producción ni Meta. Todos los datos de prueba son sintéticos.
+Trabajo hecho en `com_brasper_ia`, `com_brasper_api` y `com_brasper_www` (portal de clientes, necesario para emitir la vinculación). Sin despliegue, sin tocar producción ni Meta. Commits locales (sin push): `com_brasper_ia` 30c5d8a/04cc4f9/50dd84b en `chore/gate-single-tenant-ci`; `com_brasper_api` c750b6a/8fdf8d3 en `feat/ia-campanas-identidad`; `com_brasper_www` 50305d0 en `feat/vincular-chat`. Todos los datos de prueba son sintéticos.
 
 | Fila | Estado | Evidencia |
 |---|---|---|
@@ -185,3 +185,13 @@ R1 básico y R2 confirmados corregidos con reproducciones sintéticas: fallo de 
 Pendiente de código C5: el lease del engine es de 45 segundos, sin renovación, y still_held se comprueba al terminar el grafo. Esa comprobación bloquea la entrega, pero no cancela trabajo ni impide escrituras anteriores. El cliente LLM admite timeout de 60 segundos. Debe probarse procesamiento superior a 45 segundos con dos workers y resolver la exclusión durante toda la operación mediante renovación/propiedad o un mecanismo equivalente. El solapamiento real no se reprodujo en esta revisión: es un riesgo identificado por inspección, no una concurrencia aprobada.
 
 Siguen pendientes PostgreSQL 16 multisesión, psycopg/Redis reales, migraciones/backup con históricos representativos, UI del portal autenticado de punta a punta, validación del panel por roles/Lighthouse y brechas financieras C1. No declarar C1–C8 completamente cerrados con esa evidencia pendiente. Meta/Coex reales permanecen en el plan externo. No se modificó producción ni implementación en esta revisión.
+
+### Estado tras la segunda revisión — 10 de octubre de 2026
+
+- **Lease (C5): resuelto** en el commit 30c5d8a. `core/lease.py` renueva el lease cada TTL/3 en un hilo propio; `engine` procesa bajo el lease y cancela el trabajo si la renovación falla. Check 75: dos workers con procesamiento mayor que el TTL (asíncrono y bloqueante) no se solapan; control negativo sin renovación falla. Detalle en [la revisión](REVISION-CODIGO-2026-10-09.md#respuesta-a-la-segunda-revisión--lease-renovado-9-oct). Límite: una escritura síncrona ya en curso no se interrumpe (solo si la base no responde más de un TTL).
+- **Siguen pendientes** (requieren infraestructura o decisiones, no más código en este equipo):
+  1. PostgreSQL 16 multisesión con el driver psycopg del bot, Redis real, caídas/recuperación y concurrencia financiera (`docker-compose.validation.yml`).
+  2. UI del portal autenticado de punta a punta (login → vincular → consulta en chat) y panel por roles con Lighthouse.
+  3. Ensayo de migración con históricos representativos (ids repetidos entre tenants para 0007, índice de 083, backup/restore).
+  4. Reglas comerciales C1: reversión completada→fallida, operaciones sin cupón reasignadas/reactivadas, conservación del descuento cotizado, redondeo.
+
