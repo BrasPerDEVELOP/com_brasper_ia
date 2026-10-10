@@ -43,3 +43,6 @@ backend/backups/
 .env.*
 !.env.example
 !.env.sample
+
+# Salidas locales de pruebas
+*-local.log
