@@ -172,33 +172,38 @@ def campaign_lifecycle_checks():
         return cid
 
     a = client("wa:51911000001", "40000001", "user-a")
-    b1 = campaigns.reserve(first["id"], a, "PxB-101", "agent@test")
+    b1 = _reserve(first["id"], a, "PxB-101")
     assert b1["state"] == "reserved" and b1["eligibility_source"] == "brasper_no_transactions"
     for target, ref in ((first["id"], "PxB-102"), (second["id"], "PxB-103")):
         try:
-            campaigns.reserve(target, a, ref, "agent@test")
+            _reserve(target, a, ref)
             raise AssertionError("primer envío repetido")
         except campaigns.BenefitRejected:
             pass
     # Otro canal / cuenta duplicada con el mismo documento: también bloqueado.
     dup = client("tg:880077", "40000001", "user-a-duplicada")
     try:
-        campaigns.reserve(second["id"], dup, "PxB-104", "agent@test")
+        _reserve(second["id"], dup, "PxB-104")
         raise AssertionError("cuenta duplicada con el mismo documento")
     except campaigns.BenefitRejected:
         pass
     # Liberar (falló la operación) solo una vez; después puede volver a reservar.
-    assert campaigns.release(b1["id"], "agent@test")["state"] == "released"
+    assert campaigns.release(b1["id"], "agent@test", "Operación cancelada en Brasper")["state"] == "released"
     try:
-        campaigns.release(b1["id"], "agent@test")
+        campaigns.release(b1["id"], "agent@test", "otra vez")
         raise AssertionError("liberación doble")
     except campaigns.BenefitRejected:
         pass
-    b2 = campaigns.reserve(second["id"], a, "PxB-105", "agent@test")
-    assert campaigns.consume(b2["id"], "agent@test")["state"] == "consumed"
+    b2 = _reserve(second["id"], a, "PxB-105")
+    try:
+        campaigns.consume(b2["id"], "agent@test", "completada")
+        raise AssertionError("sin referencia oficial registrada no se consume")
+    except campaigns.BenefitRejected:
+        pass
+    assert _complete(b2["id"])["state"] == "consumed"
     for action in (campaigns.release, campaigns.consume):
         try:
-            action(b2["id"], "agent@test")
+            action(b2["id"], "agent@test", "nota")
             raise AssertionError("un consumido no cambia")
         except campaigns.BenefitRejected:
             pass
@@ -207,20 +212,25 @@ def campaign_lifecycle_checks():
     unknown = db.get_or_create_conversation("wa:51911000009", "whatsapp")
     db.merge_lead_data(unknown, {"identity_source": "channel_phone_match", "brasper_user_id": "user-u",
                                  "is_first_transfer": False})
-    try:
-        campaigns.reserve(first["id"], unknown, "PxB-200", "agent@test")
-        raise AssertionError("sin dato no se confirma")
-    except campaigns.BenefitRejected:
-        pass
-    assert campaigns.reserve(first["id"], unknown, "PxB-200", "agent@test", advisor_verified=True)["eligibility_source"] == "advisor_verified"
+    for note in (None, "ok", "   verificado   "):
+        try:
+            _reserve(first["id"], unknown, "PxB-200", note=note)
+            raise AssertionError("sin dato y sin evidencia humana suficiente no se reserva")
+        except campaigns.BenefitRejected:
+            pass
+    verified_b = _reserve(first["id"], unknown, "PxB-200",
+                          note="Revisé el historial del cliente en el backoffice de Brasper: sin envíos completados")
+    assert verified_b["eligibility_source"] == "advisor_verified"
+    assert "backoffice" in campaigns.benefit(verified_b["id"])["evidence"]
 
     # 6) Concurrencia: muchas reservas simultáneas no superan el cupo total ni duplican primer envío.
     capped = _published(name="Cupo 2", max_uses=2, campaign_rules={"segment": "all"})
     convs = [client(f"wa:5191200000{i}", f"5000000{i}", f"user-c{i}") for i in range(6)]
+    case_ids = [_accept(capped["id"], c) for c in convs]
 
     def attempt(i):
         try:
-            campaigns.reserve(capped["id"], convs[i], f"PxB-30{i}", "agent@test")
+            campaigns.reserve(case_ids[i], "agent@test", operation_ref=f"PxB-30{i}")
             return True
         except campaigns.BenefitRejected:
             return False
@@ -228,10 +238,11 @@ def campaign_lifecycle_checks():
     with ThreadPoolExecutor(max_workers=6) as pool:
         results = list(pool.map(attempt, range(6)))
     assert sum(results) == 2, results
-    same = client("wa:51913000000", "60000000", "user-same")
+    # Misma persona en 5 conversaciones/canales con expedientes propios: un solo primer envío.
     ft = _published(name="Primer envío C")
+    same_cases = [_accept(ft["id"], client(f"wa:5191300000{i}", "60000000", "user-same")) for i in range(5)]
     with ThreadPoolExecutor(max_workers=5) as pool:
-        wins = sum(pool.map(lambda i: _try(ft["id"], same, f"PxB-40{i}"), range(5)))
+        wins = sum(pool.map(lambda i: _try(same_cases[i], f"PxB-40{i}"), range(5)))
     assert wins == 1, wins
 
     # 7) Cotización: nota de ahorro estimado solo con elegibilidad confirmada y si supera el cupón público.
@@ -263,12 +274,39 @@ def campaign_lifecycle_checks():
         campaigns.published_active()
 
 
-def _try(campaign_id, cid, ref):
+def _try(case_id, ref):
     try:
-        campaigns.reserve(campaign_id, cid, ref, "agent@test")
+        campaigns.reserve(case_id, "agent@test", operation_ref=ref)
         return 1
     except campaigns.BenefitRejected:
         return 0
+
+
+def _accept(campaign_id, cid, amount=1000.0, ruta="PEN->BRL", gross=30.0, version=None):
+    """Cotización vigente con la promoción aceptada -> expediente nuevo (como en el checkout)."""
+    from core import cases, util
+    if version is None:
+        with db.connect() as con:
+            version = dict(con.execute("SELECT published_version FROM campaigns WHERE id=?", (campaign_id,)).fetchone())["published_version"]
+    current = cases.active_case(cid)
+    if current:
+        cases.close(current["id"], "test", cancelled=True)
+    db.merge_lead_data(cid, {"ruta": ruta, "modo": "send", "monto_enviar": amount, "monto_recibir": round(amount * 1.4, 2),
+                             "tasa": 1.4, "comision_bruta": gross, "comision": gross, "comision_tasa": 3.0,
+                             "cotizado_en": util.now_iso(),
+                             "campaign_estimate": {"campaign_id": campaign_id, "version": version, "saving": 1.0}})
+    return cases.open_case(cid)["case"]["id"]
+
+
+def _reserve(campaign_id, cid, ref, note=None):
+    return campaigns.reserve(_accept(campaign_id, cid), "agent@test", operation_ref=ref, verification_note=note)
+
+
+def _complete(benefit_id):
+    from core import cases
+    row = campaigns.benefit(benefit_id)
+    cases.register(row["case_id"], row["operation_ref"], "agent@test")
+    return campaigns.consume(benefit_id, "agent@test", "Completada según el backoffice de Brasper")
 
 
 def case_and_rules_checks(client=None, owner_headers=None, wa_payload=None):
@@ -346,7 +384,7 @@ def case_and_rules_checks(client=None, owner_headers=None, wa_payload=None):
     cid3 = db.get_or_create_conversation("wa:51914000003", "whatsapp")
     db.merge_lead_data(cid3, {"identity_source": "channel_phone_match", "brasper_user_id": "u-exp",
                               "is_first_transfer": True})
-    b = campaigns.reserve(ft["id"], cid3, "PxB-700", "agent@test")
+    b = _reserve(ft["id"], cid3, "PxB-700")
     try:
         campaigns.expire(b["id"], "agent@test", "")
         raise AssertionError("requiere nota de conciliación")
@@ -354,7 +392,7 @@ def case_and_rules_checks(client=None, owner_headers=None, wa_payload=None):
         pass
     campaigns.expire(b["id"], "agent@test", "La operación nunca se registró en Brasper")
     assert [t["to_state"] for t in campaigns.transitions(b["id"])] == ["reserved", "expired"]
-    assert campaigns.reserve(ft["id"], cid3, "PxB-701", "agent@test")["state"] == "reserved", "cupo liberado"
+    assert _reserve(ft["id"], cid3, "PxB-701")["state"] == "reserved", "cupo liberado"
 
     # 5) Estados de entrega de la oferta: preparado -> enviado / solo texto / incierto.
     from core import campaign_offers
@@ -368,3 +406,121 @@ def case_and_rules_checks(client=None, owner_headers=None, wa_payload=None):
     campaign_offers.mark_delivery(key, {"sent": True})
     assert campaign_offers.offered(cid)[0]["state"] == "uncertain", "un estado final no se reescribe"
     _disable_all()
+
+
+def review_regression_checks():
+    """Revisión 10 oct: P1 tabla de ofertas anterior, P2 reserva ligada al expediente, P3 snapshot."""
+    import tempfile
+    from pathlib import Path
+    from core import campaign_offers, cases, quotes, util
+    _disable_all()
+
+    # P1) Tabla de ofertas del diseño anterior (8 columnas) con datos: se repara sin perder ni reenviar.
+    original = db.DB_PATH
+    try:
+        db.DB_PATH = Path(tempfile.mkdtemp(prefix="legacy_offers_")) / "legacy.db"
+        db.init_db()
+        with db.connect() as con:
+            con.execute("DROP TABLE campaign_offers")
+            con.execute("CREATE TABLE campaign_offers (subject TEXT NOT NULL, coupon_id TEXT NOT NULL, version INTEGER NOT NULL, "
+                        "conversation_id TEXT NOT NULL, language TEXT NOT NULL, asset_id TEXT, asset_version INTEGER, "
+                        "offered_at TEXT NOT NULL, PRIMARY KEY(subject, coupon_id, version))")
+            con.execute("INSERT INTO campaign_offers VALUES ('contact-x','camp-old',1,'c-old','es',NULL,NULL,'2026-10-01')")
+        campaign_offers.ensure_schema()
+        campaign_offers.ensure_schema()  # idempotente
+        with db.connect() as con:
+            old = dict(con.execute("SELECT * FROM campaign_offers WHERE subject='contact-x'").fetchone())
+        assert old["state"] == "legacy_unverified" and old["delivery_key"] and old["updated_at"] == "2026-10-01", old
+        cid = db.get_or_create_conversation("legacy-offer-user", "webchat")
+        offer = {"coupon_id": "camp-new", "published_version": 1,
+                 "messages": {"es": {"text": "Promo", "media_id": None}, "pt": {"text": "Promo", "media_id": None}}}
+        assert campaign_offers._record(cid, offer, "es", with_disclaimer=False), "el registro nuevo funciona"
+        campaign_offers.mark_delivery(old["delivery_key"], {"sent": True})
+        with db.connect() as con:
+            state = dict(con.execute("SELECT state FROM campaign_offers WHERE subject='contact-x'").fetchone())["state"]
+        assert state == "legacy_unverified", "una oferta antigua no se marca enviada"
+    finally:
+        db.DB_PATH = original
+
+    # P2) Reserva ligada al expediente y a la versión aceptada.
+    def person(ref, user, doc):
+        cid = db.get_or_create_conversation(ref, "whatsapp")
+        db.merge_lead_data(cid, {"identity_source": "channel_phone_match", "brasper_user_id": user,
+                                 "is_first_transfer": True, "tipo_documento": "dni", "numero_documento": doc})
+        return cid
+
+    def rejected(fn, label):
+        try:
+            fn()
+            raise AssertionError(label)
+        except campaigns.BenefitRejected:
+            pass
+
+    only_pen = _published(name="Solo PEN a BRL", routes=["PEN_BRL"], campaign_rules={"segment": "all", "minimum_amount": 500})
+    c1 = person("wa:51915000001", "u-p2a", "70000001")
+    rejected(lambda: campaigns.reserve(_accept(only_pen["id"], c1, ruta="BRL->PEN"), "a@t", operation_ref="PxB-801"),
+             "ruta incompatible")
+    rejected(lambda: campaigns.reserve(_accept(only_pen["id"], c1, amount=100), "a@t", operation_ref="PxB-802"),
+             "monto fuera de límites")
+    case_ok = _accept(only_pen["id"], c1, amount=1000, gross=30)
+    rejected(lambda: campaigns.reserve(case_ok, "a@t", operation_ref="PxB-803", campaign_id="otra"), "campaña distinta")
+    # Republicada después de la aceptación: exige volver a cotizar y aceptar.
+    with patch.object(media_library, "approved", side_effect=_approved):
+        v2 = campaigns.save(_draft(name="Solo PEN a BRL", routes=["PEN_BRL"],
+                                   campaign_rules={"segment": "all", "minimum_amount": 500}, discount_percentage=60),
+                            "owner@test", only_pen["id"], 1)
+        campaigns.publish(only_pen["id"], v2["version"], "owner@test", routes_available=ROUTES)
+    rejected(lambda: campaigns.reserve(case_ok, "a@t", operation_ref="PxB-804"), "versión republicada")
+    reaccepted = _accept(only_pen["id"], c1, amount=1000, gross=30)
+    b = campaigns.reserve(reaccepted, "a@t", operation_ref="PxB-805")
+    row = campaigns.benefit(b["id"])
+    assert row["case_id"] == reaccepted and row["campaign_version"] == v2["version"]
+    assert (row["commission_gross"], row["discount"], row["commission_final"]) == (30.0, 18.0, 12.0), row
+    # Expediente sin promoción aceptada y cotización vencida.
+    c2 = person("wa:51915000002", "u-p2b", "70000002")
+    db.merge_lead_data(c2, {"ruta": "PEN->BRL", "monto_enviar": 1000, "monto_recibir": 1400, "tasa": 1.4,
+                            "comision_bruta": 30, "cotizado_en": util.now_iso(), "campaign_estimate": None}, allow_null=True)
+    plain = cases.open_case(c2)["case"]["id"]
+    rejected(lambda: campaigns.reserve(plain, "a@t", operation_ref="PxB-806"), "sin promoción aceptada")
+    stale = (datetime.now(timezone.utc) - timedelta(minutes=quotes._tc_validity_minutes() + 1)).isoformat()
+    c3 = person("wa:51915000003", "u-p2c", "70000003")
+    db.merge_lead_data(c3, {"ruta": "PEN->BRL", "monto_enviar": 1000, "monto_recibir": 1400, "tasa": 1.4,
+                            "comision_bruta": 30, "cotizado_en": stale,
+                            "campaign_estimate": {"campaign_id": only_pen["id"], "version": v2["version"]}})
+    assert cases.open_case(c3)["status"] == "quote_expired" and cases.active_case(c3) is None
+
+    # P3) Snapshot con desglose; nueva cotización sin campaña borra la anterior; concurrencia de expedientes.
+    snap = cases.view(cases.get(reaccepted))
+    assert snap["quote"]["comision_bruta"] == 30 and "comision" in snap["quote"]
+    assert snap["campaign"]["campaign_id"] == only_pen["id"]
+    _disable_all()
+    c4 = person("wa:51915000004", "u-p3", "70000004")
+    db.merge_lead_data(c4, {"campaign_estimate": {"campaign_id": "vieja", "version": 1}})
+    flags = dict(features.all_flags(), campaigns=True)
+    with patch.object(features, "all_flags", return_value=flags):
+        from core import lead_onboarding
+        with patch.object(lead_onboarding, "refresh_history", return_value=None):
+            _run(engine.handle_message("wa:51915000004", "cotizar 500 PEN a BRL", channel="whatsapp", conversation_id=c4))
+    lead4 = db.get_lead_data(c4)
+    assert lead4.get("campaign_estimate") is None and lead4.get("comision_bruta") is not None, lead4
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(lambda _: cases.open_case(c4), range(6)))
+    with db.connect() as con:
+        n = con.execute("SELECT COUNT(*) FROM sales_cases WHERE conversation_id=? AND status IN "
+                        "('accepted','proof_received','registered')", (c4,)).fetchone()[0]
+    assert n == 1, n
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(lambda i: cases.attach_proof(c4, {"provider": "whatsapp", "ref": f"m-{i}", "kind": "image"}), range(6)))
+    assert len(cases.view(cases.active_case(c4))["proofs"]) == 6, "ningún comprobante perdido"
+
+    # P3) Selección por ahorro efectivo después de topes (no por prioridad nominal).
+    capped = _published(name="50 con tope 5", discount_percentage=50, routes=["PEN_BRL"],
+                        campaign_rules={"segment": "all", "priority": 90, "maximum_discount": 5})
+    plain30 = _published(name="30 sin tope", discount_percentage=30, routes=["PEN_BRL"],
+                         campaign_rules={"segment": "all", "priority": 1})
+    lead = {"identity_source": "channel_phone_match", "brasper_user_id": "u-sel", "is_first_transfer": True}
+    pick = campaigns.for_quote(lead, "PEN", "BRL", 1000, 30)
+    assert pick["campaign_id"] == plain30["id"] and pick["saving"] == 9.0, (pick["draft"].name, pick["saving"])
+    assert campaigns.for_quote(lead, "PEN", "BRL", 100, 10)["campaign_id"] == capped["id"], "con comisión baja gana el 50"
+    _disable_all()
+

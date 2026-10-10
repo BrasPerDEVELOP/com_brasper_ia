@@ -146,18 +146,13 @@ def cmd_import_campaigns(args) -> None:
     """Importación EXPLÍCITA y de solo lectura de campañas del diseño anterior (API financiera).
     Quedan como borrador en IA; no se publica ni se escribe nada en Brasper."""
     import json
-    from core import brasper_api, campaigns
+    from core import campaigns
     db.init_db()
-    if args.file:
-        with open(args.file, encoding="utf-8") as fh:
-            data = json.load(fh)
-        rows = data.get("campaigns", data) if isinstance(data, dict) else data
-    else:
-        result = brasper_api._integration_request(T.get_config(), "GET", "/brasper/ai/admin/campaigns", admin=True)
-        if not result.get("ok"):
-            print(f"[import-campaigns] no se pudo leer la API ({result.get('error')}); usa --file con una exportación")
-            return
-        rows = (result.get("data") or {}).get("campaigns", [])
+    # La API financiera ya no expone la administración de campañas: se importa una exportación
+    # de solo lectura (ver docs/plans/RETIRADA-CAMPANAS-API-2026-10-10.md).
+    with open(args.file, encoding="utf-8") as fh:
+        data = json.load(fh)
+    rows = data.get("campaigns", data) if isinstance(data, dict) else data
     report = campaigns.import_legacy(rows, args.actor)
     print(f"[import-campaigns] leídas: {len(rows)} · importadas como borrador: {len(report['imported'])}")
     for code in report["imported"]:
@@ -200,7 +195,7 @@ def main() -> int:
     sp.add_argument("--temporary", action="store_true", help="obligar a cambiarla en el próximo login")
 
     ic = sub.add_parser("import-campaigns", help="importar campañas del diseño anterior como borradores IA")
-    ic.add_argument("--file", default=None, help="JSON exportado ({campaigns:[{draft:{...}}]}); sin él lee la API")
+    ic.add_argument("--file", required=True, help="JSON exportado ({campaigns:[{draft:{...}}]})")
     ic.add_argument("--actor", default="import@manage")
 
     sub.add_parser("list-users", help="listar usuarios del panel")

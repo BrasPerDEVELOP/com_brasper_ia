@@ -524,6 +524,11 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
             "coupon_code": quote.get("coupon_code"),
             "campaign_version": quote.get("campaign_version"),
             "coupon_savings_amount": quote.get("coupon_savings_amount", 0),
+            "comision_bruta": quote.get("commission_gross"),
+            "comision_tasa": quote.get("commission_rate"),
+            "comision": quote.get("commission"),
+            # Una cotización nueva invalida la promoción de la anterior; se recalcula abajo.
+            "campaign_estimate": None,
             "cotizado_en": util.now_iso(),
         }, allow_null=True)
         conv = db.get_conversation(cid)
@@ -555,8 +560,11 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
             applicable = campaigns.discount_applicable()
             note, banner = campaign_offers.quote_offer(cid, match, language, request["origin"], applicable=applicable)
             final += "\n\n" + note
+            gross = float(quote.get("commission_gross") or 0)
             db.merge_lead_data(cid, {"campaign_estimate": {
-                "campaign_id": match["campaign_id"], "version": match["version"], "saving": match["saving"],
+                "campaign_id": match["campaign_id"], "version": match["version"], "name": match["draft"].name,
+                "ruta": f"{request['origin']}->{request['destination']}", "monto_enviar": quote.get("amount_send"),
+                "comision_bruta": gross, "saving": match["saving"], "comision_final": round(gross - match["saving"], 2),
                 "eligibility_source": match["eligibility_source"],
                 "state": "quoted" if applicable else "pending_advisor_confirmation"}})
     db.add_message(cid, "assistant", final)

@@ -6,7 +6,54 @@ Este es el plan prioritario para campañas y usuarios. Sustituye cualquier instr
 
 ## Restricción obligatoria y criterio de finalización
 
-El trabajo se ejecuta exclusivamente en `com_brasper_ia`. `com_brasper_api`, el portal web y el backoffice financiero quedan en solo lectura: no editar, revertir commits, borrar archivos, modificar migraciones, crear campañas/cupons allí ni desplegar esos proyectos. El humano verifica el depósito y genera la transacción financiera. La IA prepara cotización, consentimiento, datos y comprobante para ese humano; no confirmar pago ni generar automáticamente la transacción como parte de este alcance.
+La implementación de capacidades se ejecuta exclusivamente en `com_brasper_ia`. No agregar capacidades de campañas a `com_brasper_api`, al portal ni al backoffice financiero. Se añade abajo un trabajo separado de retirada selectiva del diseño anterior de campañas en la API principal; no es autorización para reescribir funciones ajenas ni desplegar ese proyecto. El humano verifica el depósito y genera la transacción financiera. La IA prepara cotización, consentimiento, datos y comprobante para ese humano; no confirmar pago ni generar automáticamente la transacción como parte de este alcance.
+
+## Revisión actual del código: pendientes para terminar
+
+La revisión local del 10 de octubre encontró campañas persistidas en IA, usuarios con contraseñas/sesiones y expedientes en el commit `5e33bed`. Se ejecutó la suite aislada `backend/tests/run_checks.py`: **79/79 pasaron**. Esto no demuestra cumplimiento completo: se identificaron los pendientes siguientes. No desplegar como terminado antes de resolverlos y verificar el panel.
+
+### P1. Migración de tabla de ofertas anterior — fallo reproducido
+
+- `0013_ia_campaigns.py` y `campaign_offers.ensure_schema()` solo hacen `CREATE TABLE IF NOT EXISTS`. Si existe la tabla de ofertas de ocho columnas del diseño previo, no agregan `delivery_key`, `state`, `updated_at`.
+- Reproducción en SQLite aislada con esquema anterior: después de aplicar los DDL de la migración faltan esas tres columnas; el INSERT del código nuevo falla por ausencia de `delivery_key`.
+- Añadir migración aditiva real que inspeccione y agregue columnas faltantes, sin borrar ofertas ni modificar versiones ya aplicadas. Verificar si 0013 ya fue aplicada en algún entorno antes de elegir reparación/0014.
+- Definir backfill de estado/clave para ofertas antiguas sin reenviarlas. Ensayar datos anteriores en SQLite y Postgres y luego operación real del repositorio de ofertas. No basta crear una base vacía.
+
+### P2. Reserva ligada a cotización y expediente
+
+- `campaigns.reserve()` recibe campaña, conversación y referencia; valida segmento/cupo/vigencia, pero no valida ruta, monto, topes ni snapshot aceptado. Además usa la versión publicada actual, no necesariamente la aceptada por el cliente.
+- Requerir expediente/cotización identificados y versión inmutable, comprobar ruta/monto/elegibilidad y conservar desglose de comisión/descuento. Impedir reservar una campaña distinta o una versión no aceptada.
+- Registrar evidencia de verificación humana cuando sustituya datos insuficientes; no permitir que un booleano sin detalle sea la única evidencia de comprobación.
+- Añadir pruebas de ruta incompatible, monto fuera de límites, versión republicada, cotización vencida y campaña que no coincide con el expediente; todas deben rechazarse o exigir nueva aceptación explícita.
+- Comprobar consumo/cancelación ligados al estado correcto de operación con acción humana auditada; no equiparar confirmación de depósito a envío completado.
+
+### P3. Snapshot y promoción obsoleta
+
+- `cases.quote_snapshot()` guarda ruta, importes, tasa y cupón, pero no el desglose completo de comisión. Añadir comisión original/final y descuento de campaña, y pruebas de conservación hasta revisión humana.
+- En `agent_graph.py`, verificar que una nueva cotización sin campaña borre un `campaign_estimate` previo. Actualmente se escribe cuando hay campaña; impedir que un expediente nuevo herede una oferta anterior incompatible.
+- Comprobar que dos aceptaciones simultáneas y dos adjuntos concurrentes no creen expedientes duplicados ni pierdan comprobantes; probar con Postgres, no solo secuencia SQLite.
+- `for_quote()` usa orden de prioridad/porcentaje; definir selección final por ahorro efectivo después de topes si se mantiene la propuesta del plan, o documentar regla de prioridad comercial y probarla.
+
+### P4. Integración y publicación pendientes
+
+- Probar UI completa de usuarios/campañas/expediente, typecheck/build y migración con históricos.
+- Confirmar contratos existentes de clientes/historial y procedimiento manual que permite aplicar descuento; no resolver faltantes agregando funciones financieras.
+- Verificar reserva concurrente y cupos con Postgres/Redis reales, además de la suite local.
+- Ensayar cambio de credenciales owner y reversión; no publicar sin acceso verificado.
+
+## Retirada selectiva del diseño anterior en la API principal
+
+Este es un pendiente de limpieza solicitado por el usuario para que campañas quede exclusivamente en IA. No se ejecutó durante esta revisión. No borrar commits completos: hay cambios mezclados de identidad, autenticación e integridad financiera.
+
+1. Inventariar el diff de campañas introducido por `c750b6a` y cambios locales posteriores. Comparar contra el estado anterior; guardar un parche de trabajo y preservar cambios ajenos. El commit de precisión `2f182ab` contiene correcciones que no deben perderse indiscriminadamente.
+2. Candidatos de retirada exclusiva: rutas nuevas de administración/publicación/reserva de campañas en `app/modules/brasper/adapters/router/campaign_routes.py`, servicio `application/campaign_service.py`, esquemas `transactions/application/schemas/campaign_schema.py`, registro del router, pruebas específicas de esas rutas y documentación/secretos exclusivamente dedicados a ellas. Buscar consumidores antes de quitar archivos completos.
+3. `ai_routes.py`, `ai_service.py`, `campaign_quote.py`, modelos/casos de uso de cupones y transacciones son mixtos: retirar solo conexiones y reglas añadidas para campañas IA; preservar el comportamiento de cupones previo y correcciones de importes. Elaborar diff revisable por función.
+4. Preservar vinculación/consulta de identidad, autenticación y correcciones independientes salvo que el usuario cambie expresamente su alcance. No eliminar endpoints ya usados para consultar clientes.
+5. No borrar migración 083 ni hacer downgrade/drop de tablas/columnas sin comprobar si se aplicó o contiene datos. En esta tarea no se modifica la base de producción. Si no se aplicó y no es requerida por capacidades conservadas, documentar retirada local de la migración y ajustar cadena solo tras comprobar dependencias. Si se aplicó, conservar historial y preparar estrategia aparte; no borrar datos financieros.
+6. Pruebas financieras existentes deben seguir pasando, incluida coherencia de redondeo/cupones tradicionales. Pruebas exclusivas de campañas retiradas se eliminan o trasladan a IA según corresponda; no borrar tests para ocultar regresiones.
+7. Entregar lista de funciones retiradas, conservadas y dependencias restantes. No hacer push, deploy, reset de Git ni eliminación de datos como efecto automático de esta limpieza. No añadir ninguna capacidad nueva a la API principal.
+
+Esta sección sustituye la prohibición absoluta de edición para permitir únicamente la retirada selectiva descrita. El resto de la API principal sigue fuera del alcance; las menciones anteriores a solo lectura significan no desarrollar campañas allí, con esta excepción de limpieza local.
 
 Finalizado significa código, migración y pruebas completas en IA, no solo actualización del documento. Una imposibilidad de obtener identidad/historial con las APIs existentes debe quedar visible como limitación, nunca solucionarse silenciosamente editando Brasper.
 
@@ -189,4 +236,21 @@ Implementado solo en `com_brasper_ia`, sin commits ni despliegue. `com_brasper_a
 | I. Entrega | Preparado | Desplegar solo IA tras backup; flag `campaigns` apagado hasta validar condiciones y procedimiento; ver RUNBOOK §9.9. |
 
 Pendientes que no se resuelven en IA: confirmación del responsable de Brasper sobre cómo el asesor registra el importe con descuento (para activar `discount_applicable`), exclusividad global del primer envío si se usó fuera de IA (solo se detecta si Brasper lo refleja en el historial), y la decisión de producto sobre campañas sin cupo global.
+
+## Resolución de la revisión (P1–P4) y retirada en la API — 10 de octubre de 2026
+
+| Pendiente | Resolución | Evidencia |
+|---|---|---|
+| P1 tabla de ofertas anterior | Migración nueva `0014_campaign_offers_columns` (no se editó `0013`, ya publicada) y `campaign_offers.ensure_schema()` agregan `delivery_key`, `state`, `updated_at` si faltan. Ofertas antiguas: clave calculada, `state='legacy_unverified'` (nunca se marcan enviadas ni se reenvían). | Check 80 (SQLite, reparación en caliente + INSERT nuevo + idempotencia); `sqlite_migration_checks.py` 0006→0014 con tabla antigua con datos; PGlite (PostgreSQL 18): 0013→ tabla antigua → 0014, repetición sin cambios, INSERT nuevo OK. |
+| P2 reserva ligada a cotización | `campaigns.reserve(case_id, …)`: exige expediente abierto con promoción y **versión aceptadas**; rechaza campaña distinta, versión republicada (volver a cotizar y aceptar), ruta no incluida, monto/comisión fuera de condiciones, vigencia. Guarda `commission_gross`, `discount`, `commission_final`, `case_id`. Sin dato suficiente de Brasper exige **nota de verificación humana** (≥15 caracteres, guardada en `evidence`), no un booleano. Consumo solo con referencia oficial registrada en el expediente y nota («el depósito confirmado no basta»); liberar/vencer con nota. | Check 80 (ruta incompatible, monto fuera de límites, campaña distinta, versión republicada, expediente sin promoción, cotización vencida, desglose 30→12); check 78/79 adaptados (nota insuficiente rechazada, consumo sin referencia rechazado). |
+| P3 snapshot y promoción obsoleta | Snapshot con `comision_bruta`, `comision_tasa`, `comision`; la promoción aceptada guarda versión, ruta, monto, comisión antes/después y ahorro. Cada cotización nueva borra `campaign_estimate` y lo recalcula. Expediente y comprobantes serializados por conversación (advisory lock en PostgreSQL, `BEGIN IMMEDIATE` en SQLite); un expediente con comprobante u operación no se reemplaza por una cotización nueva. Selección de campaña: **mayor ahorro efectivo tras mínimos/máximos/topes**, empate por prioridad y luego id. | Check 80 (6 aceptaciones simultáneas → 1 expediente; 6 comprobantes simultáneos → 6 conservados; recotizar sin campaña borra la anterior; 30% sin tope gana a 50% con tope 5 y al revés con comisión baja). |
+| P4 integración | Panel: la reserva se hace desde el expediente (referencia + nota de verificación); consumir/liberar/vencer piden nota. Revisión visual local: expediente con desglose y pendientes, reserva desde la UI («Reservado · descuento 15, comisión 30 → 15»). `tsc` y `next build` OK. | Pendiente fuera de este equipo: PostgreSQL 16 multisesión y Redis reales (concurrencia probada con hilos en SQLite), migración sobre copia de datos reales, ensayo de cambio de credenciales owner en el servidor y confirmación del procedimiento de Brasper para el importe con descuento. |
+
+Limpieza en IA: retirada la cotización personalizada del diseño anterior (`brasper_api.personalized_quote`, rama `identity` de `quotes.compute`) y el camino del secreto administrativo en `_integration_request`; `manage.py import-campaigns` exige `--file` porque la API ya no expone la administración; `BRASPER_IA_ADMIN_SECRET` fuera de `.env.example`.
+
+### Retirada selectiva en la API principal
+
+Hecha en el commit `74595ff` (detalle en [RETIRADA-CAMPANAS-API-2026-10-10.md](RETIRADA-CAMPANAS-API-2026-10-10.md)): se retiraron las rutas y el servicio de administración de campañas, `CampaignDraft`, `POST /brasper/ai/quotes` con `quote_for_client`, `BRASPER_IA_ADMIN_SECRET` y sus entradas de auditoría; se conservaron identidad, autenticación, auditoría, facturación, correcciones C1, migraciones 083/084 y la rama de campañas en el registro (latente, para no aplicar filas `CAMPAIGN` existentes sin sus límites). Suite API: 458 → 457.
+
+**Incidente:** el trabajo debía quedar en la rama local `limpieza/retirada-campanas-api` para revisión. Una acción externa a las sesiones del agente (el reflog registra un `pull --ff --recurse-submodules --progress` propio de un cliente Git gráfico, seguido de `checkout main`) dejó el commit en `main` y luego se hizo push: `origin/main` = `74595ff`. No se reescribió historia. Opciones del responsable: conservarlo (tests verdes) o `git revert 74595ff` en `main` y llevarlo a la rama para revisión. Si `main` despliega automáticamente, esas rutas pueden ya no existir en el servidor.
 

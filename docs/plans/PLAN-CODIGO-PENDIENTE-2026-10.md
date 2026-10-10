@@ -1,5 +1,7 @@
 # Plan ejecutable de código pendiente — Brasper IA
 
+> Última revisión: 79/79 checks IA pasan, pero NO está cerrado. Ver P1–P4 y «Retirada selectiva del diseño anterior en la API principal» en [plan prioritario](PLAN-CAMPANAS-Y-USUARIOS-2026-10-10.md). La limpieza local selectiva de campañas es la única excepción al límite de no editar Brasper; no borrar commits mixtos ni datos ni desplegar esa API. Corregir primero migración de ofertas existentes y reserva contra snapshot aceptado.
+
 > Corrección de alcance acordada el 10 de octubre: para campañas y usuarios, prevalece [PLAN-CAMPANAS-Y-USUARIOS-2026-10-10.md](PLAN-CAMPANAS-Y-USUARIOS-2026-10-10.md). Campañas se administran y persisten en el panel/backend IA. Consumir contratos existentes de Brasper; no implementar, ampliar ni desplegar campañas en `com_brasper_api`. Las instrucciones anteriores que reparten esa capacidad entre ambos repositorios quedan sustituidas. Los estados históricos siguientes no certifican este nuevo alcance como implementado.
 
 ## Pendiente por cambio de alcance

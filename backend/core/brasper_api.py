@@ -183,14 +183,14 @@ def _service_token(tenant: dict, *, force: bool = False) -> str | None:
         return token
 
 
-def _integration_request(tenant: dict, method: str, path: str, *, admin: bool = False,
+def _integration_request(tenant: dict, method: str, path: str, *,
                          expected_errors: frozenset[int] = frozenset(), extra_headers: dict | None = None,
                          **kwargs) -> dict:
-    secret = os.getenv("BRASPER_IA_ADMIN_SECRET") if admin else _integration_secret(tenant)
+    secret = _integration_secret(tenant)
     if not secret:
         return {"ok": False, "error": "integración IA no configurada"}
     headers = {**(extra_headers or {}), "accept": "application/json",
-               "X-Brasper-IA-Admin-Secret" if admin else "X-Brasper-IA-Secret": secret}
+               "X-Brasper-IA-Secret": secret}
     try:
         with httpx.Client(timeout=20.0) as client:
             bearer = _service_token(tenant)
@@ -213,9 +213,6 @@ def _integration_request(tenant: dict, method: str, path: str, *, admin: bool = 
                     observability.event("brasper_api.service_auth_failed", path=path)
                     return {"ok": False, "status": None, "error": "autenticación de servicio rechazada"}
                 return {"ok": False, "status": response.status_code, "error": "rechazado por la API"}
-            if admin and response.status_code in {400, 404, 409, 422}:
-                return {"ok": False, "status": response.status_code,
-                        "error": response.json().get("detail", "La API rechazó la solicitud")}
             response.raise_for_status()
             data = response.json() if response.content else None
             return {"ok": True, "data": data, "status": response.status_code}
@@ -296,13 +293,6 @@ def client_history(tenant: dict, user_id: str, code_phone: str, phone: str) -> d
         return {"ok": False, "error": "identidad no válida"}
     return _integration_request(tenant, "GET", f"/brasper/ai/clients/{client_id}/history",
                                 params={"code_phone": code_phone, "phone": phone})
-
-
-def personalized_quote(tenant: dict, identity: dict, origin: str, destination: str, amount: float, mode: str):
-    return _integration_request(tenant, "POST", "/brasper/ai/quotes", json={
-        "user_id": identity["brasper_user_id"], "code_phone": identity["codigo_telefono"],
-        "phone": identity["telefono"], "origin": origin, "destination": destination,
-        "amount": amount, "mode": mode})
 
 
 def operation_status(tenant: dict, user_id: str, code_phone: str, phone: str, reference: str = ""):

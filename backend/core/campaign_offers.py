@@ -29,6 +29,26 @@ def ensure_schema() -> None:
                     "asset_id TEXT, asset_version INTEGER, offered_at TEXT NOT NULL, delivery_key TEXT, "
                     "state TEXT NOT NULL DEFAULT 'prepared', updated_at TEXT, "
                     "PRIMARY KEY(subject, coupon_id, version))")
+        # Tabla del diseño anterior (8 columnas): agregar lo que falte sin perder ofertas (= migración 0014).
+        existing = _columns(con)
+        for name, ddl in (("delivery_key", "TEXT"), ("state", "TEXT NOT NULL DEFAULT 'legacy_unverified'"),
+                          ("updated_at", "TEXT")):
+            if name not in existing:
+                con.execute(f"ALTER TABLE campaign_offers ADD COLUMN {name} {ddl}")
+        rows = [dict(r) for r in con.execute("SELECT subject, coupon_id, version, language, offered_at "
+                                             "FROM campaign_offers WHERE delivery_key IS NULL").fetchall()]
+        for r in rows:
+            con.execute("UPDATE campaign_offers SET delivery_key=?, updated_at=COALESCE(updated_at, ?) "
+                        "WHERE subject=? AND coupon_id=? AND version=?",
+                        (idempotency.make_key("campaign_offer", r["subject"], r["coupon_id"], r["version"], r["language"]),
+                         r["offered_at"], r["subject"], r["coupon_id"], r["version"]))
+
+
+def _columns(con) -> set[str]:
+    if db.is_postgres():
+        return {r["column_name"] for r in con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='campaign_offers'").fetchall()}
+    return {r[1] for r in con.execute("PRAGMA table_info(campaign_offers)").fetchall()}
 
 
 def active() -> list[dict]:

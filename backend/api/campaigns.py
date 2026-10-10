@@ -21,9 +21,12 @@ class PublishIn(BaseModel):
 
 
 class ReserveIn(BaseModel):
-    conversation_id: str = Field(min_length=1, max_length=40)
-    operation_ref: str = Field(min_length=2, max_length=80)
-    advisor_verified: bool = False
+    operation_ref: str | None = Field(default=None, min_length=2, max_length=80)
+    verification_note: str | None = Field(default=None, max_length=500)
+
+
+class NoteIn(BaseModel):
+    note: str = Field(min_length=3, max_length=500)
 
 
 def _call(fn, *args, **kwargs):
@@ -108,14 +111,18 @@ def conversation_benefits(conversation_id: str, user=Depends(auth.require("conve
             "eligibility": campaigns.eligibility(db.get_lead_data(conversation_id))}
 
 
-@router.post("/campaigns/{campaign_id}/benefits")
-def reserve(campaign_id: str, body: ReserveIn, user=Depends(auth.require("conversations:write"))):
-    _conversation_for(user, body.conversation_id)
-    result = _call(campaigns.reserve, campaign_id, body.conversation_id, body.operation_ref, user["email"],
-                   advisor_verified=body.advisor_verified)
-    db.add_audit_event(user["email"], "campaign.benefit_reserved", f"campaign:{campaign_id}",
-                       {"benefit_id": result["id"], "operation_ref": body.operation_ref,
-                        "eligibility_source": result["eligibility_source"]})
+@router.post("/cases/{case_id}/benefit")
+def reserve(case_id: str, body: ReserveIn, user=Depends(auth.require("conversations:write"))):
+    """Reserva la promoción aceptada en el expediente (ruta, monto y versión de la aceptación)."""
+    case = _case_for(user, case_id)
+    from core import lead_onboarding
+    conv = db.get_conversation(case["conversation_id"]) or {}
+    # Historial oficial justo antes de reservar (cuando Brasper lo expone).
+    lead_onboarding.refresh_history(case["conversation_id"], conv.get("channel", "webchat"), conv.get("user_ref", ""))
+    result = _call(campaigns.reserve, case_id, user["email"], operation_ref=body.operation_ref,
+                   verification_note=body.verification_note)
+    db.add_audit_event(user["email"], "campaign.benefit_reserved", f"case:{case_id}",
+                       {"benefit_id": result["id"], "eligibility_source": result["eligibility_source"]})
     return result
 
 
@@ -128,17 +135,17 @@ def _benefit_conversation(user: dict, benefit_id: str) -> None:
 
 
 @router.post("/campaign-benefits/{benefit_id}/consume")
-def consume(benefit_id: str, user=Depends(auth.require("conversations:write"))):
+def consume(benefit_id: str, body: NoteIn, user=Depends(auth.require("conversations:write"))):
     _benefit_conversation(user, benefit_id)
-    result = _call(campaigns.consume, benefit_id, user["email"])
+    result = _call(campaigns.consume, benefit_id, user["email"], body.note)
     db.add_audit_event(user["email"], "campaign.benefit_consumed", f"campaign_benefit:{benefit_id}", {})
     return result
 
 
 @router.post("/campaign-benefits/{benefit_id}/release")
-def release(benefit_id: str, user=Depends(auth.require("conversations:write"))):
+def release(benefit_id: str, body: NoteIn, user=Depends(auth.require("conversations:write"))):
     _benefit_conversation(user, benefit_id)
-    result = _call(campaigns.release, benefit_id, user["email"])
+    result = _call(campaigns.release, benefit_id, user["email"], body.note)
     db.add_audit_event(user["email"], "campaign.benefit_released", f"campaign_benefit:{benefit_id}", {})
     return result
 

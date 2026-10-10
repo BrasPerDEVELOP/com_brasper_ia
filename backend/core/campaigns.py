@@ -112,10 +112,20 @@ class BenefitRejected(ValueError):
 
 
 # ---------------------------------------------------------------- esquema
+BENEFIT_COLUMNS = (("case_id", "TEXT"), ("commission_gross", "REAL"), ("discount", "REAL"),
+                   ("commission_final", "REAL"), ("evidence", "TEXT"))
+
+
 def ensure_schema() -> None:
     with db.connect() as con:
         for sql in DDL:
             con.execute(sql)
+        existing = ({r["column_name"] for r in con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='campaign_benefits'").fetchall()}
+            if db.is_postgres() else {r[1] for r in con.execute("PRAGMA table_info(campaign_benefits)").fetchall()})
+        for name, kind in BENEFIT_COLUMNS:
+            if name not in existing:
+                con.execute(f"ALTER TABLE campaign_benefits ADD COLUMN {name} {kind}")
 
 
 DDL = [
@@ -324,9 +334,13 @@ def first_transfer_claimed(lead: dict, contact_id: str | None = None) -> bool:
 def for_quote(lead: dict, origin: str, destination: str, amount: float, commission: float,
               contact_id: str | None = None) -> dict | None:
     """Campaña aplicable a una cotización de un cliente con elegibilidad confirmada.
-    Informativo: no reserva y no cambia el cobro registrado en Brasper."""
+
+    Regla (una sola campaña, nunca se suman): mayor ahorro EFECTIVO después de mínimos,
+    máximos y topes; empate -> mayor prioridad; luego id. Informativo: no reserva y no cambia
+    el cobro registrado en Brasper."""
     elig = eligibility(lead)
     claimed = first_transfer_claimed(lead, contact_id)
+    candidates = []
     for item in published_active():
         draft = item["draft"]
         if not _route_ok(draft, origin, destination) or _segment_ok(draft.campaign_rules.segment, elig) is not True:
@@ -335,8 +349,10 @@ def for_quote(lead: dict, origin: str, destination: str, amount: float, commissi
             continue
         saving = estimated_saving(draft, amount, commission)
         if saving > 0:
-            return {**item, "saving": saving, "eligibility_source": elig["source"]}
-    return None
+            candidates.append({**item, "saving": saving, "eligibility_source": elig["source"]})
+    if not candidates:
+        return None
+    return min(candidates, key=lambda c: (-c["saving"], -c["draft"].campaign_rules.priority, c["campaign_id"]))
 
 
 # ---------------------------------------------------------------- beneficios
@@ -352,61 +368,97 @@ def _identity_keys(lead: dict, contact_id: str | None) -> list[str]:
     return keys
 
 
-def reserve(campaign_id: str, conversation_id: str, operation_ref: str, actor: str,
-            advisor_verified: bool = False) -> dict:
-    """Reserva al registrar la operación pendiente en Brasper. Atómico: cupo total, límite por
-    persona y primer envío único por identidad (cliente, contacto, documento) entre campañas."""
-    if not re.fullmatch(r"[A-Za-z0-9_-]{2,80}", operation_ref or ""):
+def reserve(case_id: str, actor: str, *, operation_ref: str | None = None,
+            verification_note: str | None = None, campaign_id: str | None = None) -> dict:
+    """Reserva el beneficio de la promoción ACEPTADA en un expediente.
+
+    Exige: expediente abierto con cotización aceptada, la misma campaña y versión que se
+    aceptaron (si se republicó, volver a cotizar y aceptar), ruta y monto compatibles con esa
+    versión, vigencia, elegibilidad confirmada con datos de Brasper o verificación humana
+    documentada, referencia de la operación registrada en Brasper. Atómico: cupo total,
+    límite por persona y primer envío único por identidad (cliente, contacto, documento)."""
+    from . import cases
+    case = cases.get(case_id)
+    if not case or case["status"] not in ("accepted", "proof_received", "registered"):
+        raise BenefitRejected("El expediente no está abierto")
+    accepted = json.loads(case["campaign"]) if case.get("campaign") else None
+    if not accepted or not accepted.get("campaign_id") or not accepted.get("version"):
+        raise BenefitRejected("El expediente no tiene una promoción aceptada; vuelve a cotizar")
+    if campaign_id and campaign_id != accepted["campaign_id"]:
+        raise BenefitRejected("La promoción no coincide con la aceptada en el expediente")
+    ref = operation_ref or case.get("operation_ref")
+    if case.get("operation_ref") and operation_ref and operation_ref != case["operation_ref"]:
+        raise BenefitRejected("La referencia no coincide con la registrada en el expediente")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{2,80}", ref or ""):
         raise BenefitRejected("Indica la referencia de la operación registrada en Brasper")
+    quote = json.loads(case["quote"])
+    conversation_id = case["conversation_id"]
     conv = db.get_conversation(conversation_id) or {}
     lead = conv.get("lead_data") or {}
     keys = _identity_keys(lead, conv.get("contact_id"))
     if not keys:
         raise BenefitRejected("El cliente no está identificado")
+    target = accepted["campaign_id"]
+    version = int(accepted["version"])
     now = util.now_iso()
     benefit_id = uuid.uuid4().hex
     with db.connect() as con:
-        row = _row(con, campaign_id, lock=True)
-        if not row["active"] or not row["published_version"]:
-            raise BenefitRejected("La campaña no está publicada")
-        draft = _draft(con, campaign_id, row["published_version"])
+        row = _row(con, target, lock=True)
+        if not row["active"]:
+            raise BenefitRejected("La campaña está desactivada")
+        if row["published_version"] != version:
+            raise BenefitRejected("La campaña se republicó después de la aceptación: vuelve a cotizar y aceptar")
+        draft = _draft(con, target, version)
         current = datetime.now(timezone.utc)
         if draft.start_date > current or draft.end_date < current:
             raise BenefitRejected("La campaña está fuera de vigencia")
+        origin, _, destination = str(quote.get("ruta") or "").partition("->")
+        if not _route_ok(draft, origin.strip(), destination.strip()):
+            raise BenefitRejected("La ruta de la operación no está incluida en la campaña")
+        amount = float(quote.get("monto_enviar") or 0)
+        gross = float(quote.get("comision_bruta") or 0)
+        saving = estimated_saving(draft, amount, gross)
+        if gross <= 0 or saving <= 0:
+            raise BenefitRejected("El monto o la comisión de la operación no cumplen las condiciones de la campaña")
         elig = eligibility(lead)
         ok = _segment_ok(draft.campaign_rules.segment, elig)
-        source = elig["source"]
+        source, evidence = elig["source"], None
         if ok is False:
             raise BenefitRejected("El cliente no cumple la condición de la campaña según Brasper")
         if ok is None:
-            if not advisor_verified:
-                raise BenefitRejected("No se pudo confirmar la elegibilidad con Brasper; verifica el historial antes de reservar")
-            source = "advisor_verified"
-        if con.execute("SELECT 1 FROM campaign_benefits WHERE campaign_id=? AND operation_ref=? AND state!='released'",
-                       (campaign_id, operation_ref)).fetchone():
-            raise BenefitRejected("Esa operación ya tiene este beneficio")
+            note = (verification_note or "").strip()
+            if len(note) < 15:
+                raise BenefitRejected("Brasper no permite confirmar la elegibilidad: describe la verificación humana "
+                                      "(qué historial revisaste y dónde)")
+            source, evidence = "advisor_verified", note[:500]
+        if con.execute("SELECT 1 FROM campaign_benefits WHERE (case_id=? OR (campaign_id=? AND operation_ref=?)) "
+                       "AND state NOT IN ('released','expired')", (case_id, target, ref)).fetchone():
+            raise BenefitRejected("Ese expediente u operación ya tiene un beneficio")
         cap = draft.max_uses if draft.max_uses is not None else 2 ** 62
         if not con.execute("UPDATE campaigns SET used_count=used_count+1, updated_at=? WHERE id=? AND used_count < ?",
-                           (now, campaign_id, cap)).rowcount:
+                           (now, target, cap)).rowcount:
             raise BenefitRejected("La campaña alcanzó su cupo total")
         person = keys[0]
         con.execute("INSERT INTO campaign_person_uses VALUES (?,?,0) ON CONFLICT(campaign_id, person_key) DO NOTHING",
-                    (campaign_id, person))
+                    (target, person))
         if not con.execute("UPDATE campaign_person_uses SET used=used+1 WHERE campaign_id=? AND person_key=? AND used < ?",
-                           (campaign_id, person, draft.per_user_limit)).rowcount:
+                           (target, person, draft.per_user_limit)).rowcount:
             raise BenefitRejected("El cliente ya usó todos sus beneficios de esta campaña")
         if draft.campaign_rules.segment == "first_transfer":
             for key in keys:
                 if not con.execute("INSERT INTO first_transfer_claims VALUES (?,?,?) ON CONFLICT(identity_key) DO NOTHING",
                                    (key, benefit_id, now)).rowcount:
                     raise BenefitRejected("El beneficio de primer envío ya fue reservado o usado por este cliente")
-        con.execute("INSERT INTO campaign_benefits VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (benefit_id, campaign_id, row["published_version"], person, conversation_id, operation_ref,
-                     "reserved", source, actor, now, now, None))
+        con.execute("INSERT INTO campaign_benefits (id, campaign_id, campaign_version, person_key, conversation_id, "
+                    "operation_ref, state, eligibility_source, created_by, created_at, updated_at, closed_by, case_id, "
+                    "commission_gross, discount, commission_final, evidence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (benefit_id, target, version, person, conversation_id, ref, "reserved", source, actor, now, now,
+                     None, case_id, gross, saving, round(gross - saving, 2), evidence))
         con.execute("INSERT INTO campaign_benefit_events VALUES (?,?,?,?,?,?)",
-                    (benefit_id, None, "reserved", actor, f"operación {operation_ref}; elegibilidad {source}", now))
-    observability.event("campaign.benefit_reserved", campaign_id=campaign_id, benefit_id=benefit_id, source=source)
-    return {"id": benefit_id, "state": "reserved", "eligibility_source": source}
+                    (benefit_id, None, "reserved", actor, f"expediente {case_id}; operación {ref}; elegibilidad {source}", now))
+    observability.event("campaign.benefit_reserved", campaign_id=target, benefit_id=benefit_id, source=source)
+    return {"id": benefit_id, "state": "reserved", "eligibility_source": source, "discount": saving,
+            "commission_gross": gross, "commission_final": round(gross - saving, 2)}
 
 
 def _close(benefit_id: str, state: str, actor: str, note: str | None = None) -> dict:
@@ -432,14 +484,27 @@ def _close(benefit_id: str, state: str, actor: str, note: str | None = None) -> 
     return {"id": benefit_id, "state": state}
 
 
-def consume(benefit_id: str, actor: str) -> dict:
-    """Operación completada: el beneficio queda consumido (no se libera nunca)."""
-    return _close(benefit_id, "consumed", actor)
+def consume(benefit_id: str, actor: str, note: str) -> dict:
+    """El asesor comprobó en Brasper que la operación se COMPLETÓ (no basta el depósito).
+    Solo con la referencia oficial ya registrada en el expediente."""
+    from . import cases
+    row = benefit(benefit_id)
+    if not row:
+        raise KeyError("Beneficio no encontrado")
+    case = cases.get(row["case_id"]) if row.get("case_id") else None
+    if not case or case["status"] != "registered" or case.get("operation_ref") != row.get("operation_ref"):
+        raise BenefitRejected("Registra primero la referencia oficial de la operación en el expediente")
+    if not (note or "").strip():
+        raise BenefitRejected("Indica dónde verificaste que la operación se completó")
+    return _close(benefit_id, "consumed", actor, note.strip()[:500])
 
 
-def release(benefit_id: str, actor: str) -> dict:
-    """Operación fallida o cancelada: libera exactamente una vez."""
-    return _close(benefit_id, "released", actor)
+def release(benefit_id: str, actor: str, note: str) -> dict:
+    """Operación fallida o cancelada en Brasper: libera exactamente una vez. Cerrar o reabrir
+    el chat nunca libera."""
+    if not (note or "").strip():
+        raise BenefitRejected("Indica por qué falló o se canceló la operación")
+    return _close(benefit_id, "released", actor, note.strip()[:500])
 
 
 def expire(benefit_id: str, actor: str, note: str) -> dict:

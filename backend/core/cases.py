@@ -48,8 +48,27 @@ def quote_snapshot(lead: dict) -> dict | None:
         return None
     return {"ruta": lead["ruta"], "modo": lead.get("modo"), "monto_enviar": lead["monto_enviar"],
             "monto_recibir": lead["monto_recibir"], "tasa": lead["tasa"],
+            # Desglose oficial de la cotización (comisión antes y después del cupón público).
+            "comision_bruta": lead.get("comision_bruta"), "comision_tasa": lead.get("comision_tasa"),
+            "comision": lead.get("comision"),
             "coupon_code": lead.get("coupon_code"), "coupon_savings_amount": lead.get("coupon_savings_amount"),
             "cotizado_en": lead["cotizado_en"], "expires_at": expires.isoformat(timespec="seconds")}
+
+
+def _lock(con, conversation_id: str) -> None:
+    """Serializa aceptaciones y adjuntos de una conversación: dos mensajes simultáneos no crean
+    expedientes duplicados ni pierden comprobantes."""
+    if db.is_postgres():
+        con.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (f"case:{conversation_id}",))
+    elif not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
+
+
+def _active(con, conversation_id: str) -> dict | None:
+    row = con.execute("SELECT * FROM sales_cases WHERE conversation_id=? AND status IN "
+                      "('accepted','proof_received','registered') ORDER BY accepted_at DESC LIMIT 1",
+                      (conversation_id,)).fetchone()
+    return dict(row) if row else None
 
 
 def open_case(conversation_id: str) -> dict:
@@ -58,13 +77,17 @@ def open_case(conversation_id: str) -> dict:
     snapshot = quote_snapshot(lead)
     if snapshot is None:
         return {"status": "quote_expired"}
-    current = active_case(conversation_id)
-    if current and json.loads(current["quote"]) == snapshot:
-        return {"status": "existing", "case": current}
     now = util.now_iso()
     case_id = uuid.uuid4().hex
-    campaign = lead.get("campaign_estimate")
+    campaign = lead.get("campaign_estimate") or None
     with db.connect() as con:
+        _lock(con, conversation_id)
+        current = _active(con, conversation_id)
+        if current and json.loads(current["quote"]) == snapshot:
+            return {"status": "existing", "case": current}
+        if current and current["status"] in ("proof_received", "registered"):
+            # Ya hay comprobante u operación: una cotización nueva no lo reemplaza en silencio.
+            return {"status": "case_in_progress", "case": current}
         if current and current["status"] == "accepted":
             # Nueva cotización aceptada sustituye a la anterior aún sin comprobante.
             con.execute("UPDATE sales_cases SET status='cancelled', updated_at=?, updated_by='bot' WHERE id=?",
@@ -93,16 +116,17 @@ def active_case(conversation_id: str) -> dict | None:
 
 def attach_proof(conversation_id: str, media: dict) -> dict | None:
     """Enlaza un comprobante al expediente abierto. Es evidencia para el asesor, no un pago."""
-    case = active_case(conversation_id)
-    if not case:
-        return None
-    proofs = json.loads(case["proofs"] or "[]")
-    ref = {k: media.get(k) for k in ("provider", "ref", "kind", "mime_type", "filename") if media.get(k)}
-    seen = {(p.get("provider"), p.get("ref")) for p in proofs}
-    if ref.get("ref") and (ref.get("provider"), ref["ref"]) not in seen:  # reintentos del webhook no duplican
-        proofs.append({**ref, "received_at": util.now_iso()})
-    status = "proof_received" if case["status"] == "accepted" else case["status"]
     with db.connect() as con:
+        _lock(con, conversation_id)
+        case = _active(con, conversation_id)
+        if not case:
+            return None
+        proofs = json.loads(case["proofs"] or "[]")
+        ref = {k: media.get(k) for k in ("provider", "ref", "kind", "mime_type", "filename") if media.get(k)}
+        seen = {(p.get("provider"), p.get("ref")) for p in proofs}
+        if ref.get("ref") and (ref.get("provider"), ref["ref"]) not in seen:  # reintentos del webhook no duplican
+            proofs.append({**ref, "received_at": util.now_iso()})
+        status = "proof_received" if case["status"] == "accepted" else case["status"]
         con.execute("UPDATE sales_cases SET proofs=?, status=?, updated_at=? WHERE id=?",
                     (json.dumps(proofs), status, util.now_iso(), case["id"]))
     return get(case["id"])

@@ -27,13 +27,18 @@ def run():
             con.execute("CREATE TABLE IF NOT EXISTS public_documents (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, "
                         "lang TEXT NOT NULL, version INTEGER NOT NULL, title TEXT NOT NULL, body_md TEXT NOT NULL, "
                         "status TEXT NOT NULL, author TEXT, created_at TEXT NOT NULL, published_at TEXT, published_by TEXT)")
+            # Tabla de ofertas del diseño anterior (8 columnas) con una oferta ya registrada.
+            con.execute("CREATE TABLE campaign_offers (subject TEXT NOT NULL, coupon_id TEXT NOT NULL, version INTEGER NOT NULL, "
+                        "conversation_id TEXT NOT NULL, language TEXT NOT NULL, asset_id TEXT, asset_version INTEGER, "
+                        "offered_at TEXT NOT NULL, PRIMARY KEY(subject, coupon_id, version))")
+            con.execute("INSERT INTO campaign_offers VALUES ('contact-1','camp-1',2,'synthetic-history','pt',NULL,NULL,'2026-10-01')")
             for title in ("Synthetic A", "Synthetic B"):
                 con.execute("INSERT INTO public_documents (slug,lang,version,title,body_md,status,created_at) "
                             "VALUES ('terminos','es',1,?,'synthetic','draft','2026-10-01')", (title,))
         command.upgrade(config, "head")
         command.upgrade(config, "head")
         with sqlite3.connect(path) as con:
-            assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0013_ia_campaigns"
+            assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0014_campaign_offers_columns"
             assert con.execute("SELECT status,human_revision FROM conversations WHERE id='synthetic-history'").fetchone() == ("handoff", 0)
             assert con.execute("SELECT content FROM messages WHERE conversation_id='synthetic-history'").fetchone()[0] == "Synthetic evidence"
             assert "tenant_id" not in {c[1] for c in con.execute("PRAGMA table_info(conversations)")}
@@ -50,12 +55,21 @@ def run():
                     "campaigns", "campaign_versions", "campaign_benefits", "first_transfer_claims", "campaign_offers"} <= tables
             assert "panel_sessions" in tables
             assert {"password_hash", "active", "must_change_password"} <= {c[1] for c in con.execute("PRAGMA table_info(panel_users)")}
+            legacy = con.execute("SELECT state, delivery_key, updated_at FROM campaign_offers WHERE subject='contact-1'").fetchone()
+            assert legacy[0] == "legacy_unverified" and len(legacy[1]) == 40 and legacy[2] == "2026-10-01", legacy
+            # El INSERT del código nuevo funciona sobre la tabla reparada y la oferta antigua bloquea un reenvío.
+            con.execute("INSERT INTO campaign_offers (subject, coupon_id, version, conversation_id, language, asset_id, "
+                        "asset_version, offered_at, delivery_key, state, updated_at) VALUES ('contact-2','camp-1',2,'c','es',"
+                        "NULL,NULL,'2026-10-02','k2','prepared','2026-10-02')")
+            assert con.execute("INSERT INTO campaign_offers (subject, coupon_id, version, conversation_id, language, offered_at, "
+                               "delivery_key, state) VALUES ('contact-1','camp-1',2,'c','pt','x','k','prepared') "
+                               "ON CONFLICT(subject, coupon_id, version) DO NOTHING").rowcount == 0
             con.commit()
             with sqlite3.connect(root / "restored.db") as restored:
                 con.backup(restored)
                 assert restored.execute("SELECT content FROM messages").fetchall() == con.execute("SELECT content FROM messages").fetchall()
                 assert restored.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        print("PASS: SQLite 0006 to 0013, historical evidence preserved, repeat migration and backup/restore")
+        print("PASS: SQLite 0006 to 0014, historical evidence preserved, repeat migration and backup/restore")
     finally:
         if previous is None: os.environ.pop("DATABASE_URL", None)
         else: os.environ["DATABASE_URL"] = previous

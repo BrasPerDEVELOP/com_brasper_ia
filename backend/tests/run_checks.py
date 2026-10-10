@@ -2087,18 +2087,10 @@ def case_approved_media_library():
 
 def case_campaign_quote_and_admin_permissions():
     from uuid import uuid4
-    saved = brasper_api.enabled, brasper_api.personalized_quote, brasper_api._integration_request
-    brasper_api.enabled = lambda tenant: True
-    q = quotes._quote_from_gross_send(500, 1.5, [{"min": 0, "max": 1000, "rate": 0.03}], {"code": "FIRST25", "discount_percentage": 25})
-    q.update({"origin_currency": "PEN", "destination_currency": "BRL", "reserved": False})
-    brasper_api.personalized_quote = lambda *args, **kwargs: {"ok": True, "data": q}
+    saved = brasper_api.enabled, brasper_api._integration_request
     try:
-        identity = {"brasper_user_id": str(uuid4()), "codigo_telefono": "+51", "telefono": "999111222"}
-        assert quotes.compute("PEN", "BRL", 500, identity=identity)["coupon_savings_amount"] == 3.75
-        q["amount_receive"] += 100
-        assert quotes.compute("PEN", "BRL", 500, identity=identity).get("error"), "no aceptar cifras incoherentes"
-        brasper_api.personalized_quote = lambda *args, **kwargs: {"ok": False}
-        assert quotes.compute("PEN", "BRL", 500, identity=identity).get("error"), "sin fallback a promo local"
+        # La cotización personalizada del diseño anterior ya no existe (ni en IA ni en la API).
+        assert not hasattr(brasper_api, "personalized_quote")
         # Diseño 10 oct: la administración vive en la plataforma IA; ninguna llamada a la API financiera.
         calls = []
         def upstream(*args, **kwargs):
@@ -2115,7 +2107,7 @@ def case_campaign_quote_and_admin_permissions():
         assert not calls, "la campaña se guarda en IA, no en la API financiera"
         assert _client().post("/api/admin/campaigns", headers=OWNER, json={"draft": {}}).status_code == 422
     finally:
-        brasper_api.enabled, brasper_api.personalized_quote, brasper_api._integration_request = saved
+        brasper_api.enabled, brasper_api._integration_request = saved
 
 
 def case_bilingual_onboarding_and_private_status():
@@ -2192,7 +2184,7 @@ def main() -> int:
     from access_checks import access_checks
     from service_auth_checks import service_auth_checks
     from lock_checks import lock_checks
-    from campaign_offer_checks import campaign_offer_checks, campaign_lifecycle_checks, case_and_rules_checks
+    from campaign_offer_checks import campaign_offer_checks, campaign_lifecycle_checks, case_and_rules_checks, review_regression_checks
     from user_checks import user_checks
     check("1. config single-tenant Brasper (secretos por env, prompt con reglas)", case_config_single_tenant)
     check("2. persistencia + orden cronologico", case_persistence_order)
@@ -2277,6 +2269,7 @@ def main() -> int:
     check("77. Campanas IA: oferta de bienvenida ES/PT, idioma incierto, imagen del idioma y sin repetir", campaign_offer_checks)
     check("78. Campanas IA: versiones, publicacion, rutas, cupos, primer envio unico, concurrencia e importacion", campaign_lifecycle_checks)
     check("79. Expediente IA, descuento no prometido sin procedimiento verificado, vencimiento conciliado y estados de oferta", case_and_rules_checks)
+    check("80. Revision: ofertas antiguas reparadas, reserva ligada a expediente/version aceptada, snapshot y concurrencia", review_regression_checks)
     failed = 0
     for name, ok, detail in _RESULTS:
         status = "PASS" if ok else "FAIL"

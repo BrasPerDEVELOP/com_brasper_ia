@@ -1,5 +1,7 @@
 # Prompt para el agente de desarrollo
 
+> Ejecutar primero los pendientes P1–P4 y la retirada selectiva documentada en [plan prioritario](PLAN-CAMPANAS-Y-USUARIOS-2026-10-10.md). El usuario pidió incluir limpieza de campañas del diseño anterior en Brasper: excepción local y limitada, sin nuevas capacidades, sin revertir commits mixtos ni despliegue financiero. La revisión encontró 79/79 checks verdes, pero una migración con tabla anterior falla y la reserva no valida el snapshot completo; no declarar terminado por pruebas verdes.
+
 > Actualización de alcance del 10 de octubre: usar prioritariamente [PLAN-CAMPANAS-Y-USUARIOS-2026-10-10.md](PLAN-CAMPANAS-Y-USUARIOS-2026-10-10.md) y la corrección inicial de [PLAN-CODIGO-PENDIENTE-2026-10.md](PLAN-CODIGO-PENDIENTE-2026-10.md). Las menciones posteriores a campañas implementadas en la API financiera son históricas y no autorizan nuevos cambios allí. Implementar campañas en IA; consultar la API Brasper existente. Preservar cambios actuales y no revertir commits mixtos automáticamente.
 
 Copia el siguiente texto en el agente que tendrá acceso a los repositorios locales:
