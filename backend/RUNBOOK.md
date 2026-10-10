@@ -89,7 +89,31 @@ Imprime el token **una sola vez**; cópialo a `PANEL_ADMIN_TOKEN` en `backend/.e
 docker compose exec api python manage.py list-users
 ```
 
-Autenticación del panel: header `X-Auth-Token: <token>`, o login con email + `PANEL_LOGIN_CODE`.
+Autenticación del panel: login con email + contraseña individual (sesión con vencimiento). El header `X-Auth-Token: <token>` sigue aceptando el token de API del owner (`PANEL_ADMIN_TOKEN`) para los `curl` de operación.
+
+### 1.5 Credenciales individuales (transición desde el código compartido)
+
+Desde la migración `0012_panel_user_credentials` cada usuario tiene contraseña propia (scrypt, solo stdlib) y las sesiones se guardan solo como hash SHA-256 con vencimiento (`PANEL_SESSION_HOURS`, 12 h por defecto). Las cuentas existentes quedan **activas y sin contraseña**: nadie pierde acceso.
+
+1. Aplicar la migración (`python manage.py migrate`) y desplegar.
+2. Mientras `PANEL_LOGIN_CODE` exista, un usuario **sin contraseña** entra con email + código (modo compatibilidad; el panel muestra el campo «Código de acceso»). Un usuario **con** contraseña ya no puede usar el código.
+3. Fijar la contraseña del owner actual (se pide oculta; nunca como argumento):
+   ```bash
+   docker compose exec api python manage.py set-password --email gestion@tu-dominio.com
+   # no interactivo: printf '%s\n' "$NUEVA" | docker compose exec -T api python manage.py set-password --email ... --password-stdin
+   ```
+   O desde el panel: Usuarios → «Cambiar mi contraseña», usando el código vigente como contraseña actual.
+4. El owner crea o resetea las cuentas del equipo en **Usuarios** (contraseña temporal que se muestra una vez; se obliga a cambiarla al entrar).
+5. Cuando todos tengan contraseña: **vaciar `PANEL_LOGIN_CODE`** y reiniciar. Revisar con `python manage.py list-users` (columna credencial).
+6. `PANEL_ADMIN_TOKEN` queda como token de API de operación del owner: el arranque lo vuelve a escribir en cada reinicio. Para retirarlo, vaciarlo en el entorno y luego «Cerrar sesiones» del owner (invalida el token anterior).
+
+Reglas que aplica el servidor:
+- Solo `owner` crea, edita, desactiva/reactiva, resetea contraseñas y cierra sesiones de otros.
+- Nunca queda el panel sin owner activo: desactivar o degradar al último owner devuelve 409 (también ante peticiones simultáneas). Nadie se desactiva a sí mismo.
+- Desactivar, resetear o «Cerrar sesiones» revoca todas las sesiones y el token estático al instante.
+- Login fallido: 401 genérico, límite de 10 intentos/min por IP y evento `auth.login_failed` en auditoría (sin contraseña). Cambios de usuarios: eventos `user.*` sin secretos.
+- Recuperación si el único owner perdió la contraseña o quedó desactivado: `python manage.py create-admin --email ...` (rota el token, fuerza `owner` y reactiva) y luego `set-password`.
+- En desarrollo, sin `PANEL_LOGIN_CODE`, los usuarios demo sin contraseña siguen entrando por email desde localhost; en producción nunca.
 
 ---
 
@@ -297,7 +321,7 @@ verificar en el panel › Conocimiento (tarjetas "Flags").
 | `webhook_dedup` | Deduplicación por id de mensaje (Meta/Telegram) |
 | `presence_required` | Asignar solo a asesores con heartbeat `available` |
 | `coex` | Procesar ecos de la app WhatsApp Business (coexistencia) |
-| `campaigns` | Cotización de campañas (requiere API con migración 083 validada) |
+| `campaigns` | Promociones de la plataforma IA: oferta en la bienvenida y nota en la cotización (ver §9.9) |
 | `operation_status` | Consulta privada de estado de envíos (teléfono verificado por WhatsApp o grant de vinculación) |
 | `identity_link` | Vinculación Telegram/webchat desde la cuenta Brasper; además exige `BRASPER_IA_GRANT_KEY` y, en la API, `BRASPER_IA_IDENTITY_LINK_ENABLED=true` |
 
@@ -375,4 +399,13 @@ Los adjuntos que envía el cliente (comprobantes, documentos, audios) requieren 
 números es un solo contacto; un BSUID sin teléfono es un contacto propio; nunca se vincula por nombre o username. Los
 choques quedan en Panel › Accesos › Contactos por revisar y no se fusionan automáticamente. El backfill de
 conversaciones históricas corre al iniciar y es idempotente.
+
+### 9.9 Promociones (campañas en la plataforma IA)
+
+- Se administran en Panel › Promociones y se guardan en la base IA (migración `0013_ia_campaigns`). La API financiera no se modifica ni se usa para administrarlas; solo se consultan tasas/rutas, cliente e historial.
+- Ciclo: borrador → publicar (valida rutas contra `/coin/tax-rate`, imágenes aprobadas en su idioma, vigencia y cupo) → desactivar. Publicar no envía mensajes masivos: la oferta solo acompaña la respuesta a un mensaje del cliente.
+- Beneficios: el asesor los reserva desde la ficha del cliente con la referencia de la operación registrada en Brasper, y los marca consumidos (completada), liberados (fallida/cancelada) o vencidos (conciliación con nota). Todo queda en `campaign_benefit_events` y auditoría.
+- `tenants.brasper.campaigns.discount_applicable` (por defecto `false`): activarlo solo cuando el responsable de Brasper confirme que el asesor puede registrar el importe con el descuento de IA. Mientras sea `false`, el bot no promete el ahorro (evento `campaign.discount_not_applicable`).
+- Migrar campañas del diseño anterior: `python manage.py import-campaigns --file export.json` (o sin `--file`, lectura de la API con `BRASPER_IA_ADMIN_SECRET`). Quedan como borradores para revisión.
+- Expediente: al pasar al pago con una cotización vigente se abre en la ficha; los comprobantes se enlazan; el asesor verifica el depósito, genera la transacción en Brasper y registra la referencia. IA nunca confirma pagos.
 

@@ -1,5 +1,17 @@
 # Plan ejecutable de código pendiente — Brasper IA
 
+> Corrección de alcance acordada el 10 de octubre: para campañas y usuarios, prevalece [PLAN-CAMPANAS-Y-USUARIOS-2026-10-10.md](PLAN-CAMPANAS-Y-USUARIOS-2026-10-10.md). Campañas se administran y persisten en el panel/backend IA. Consumir contratos existentes de Brasper; no implementar, ampliar ni desplegar campañas en `com_brasper_api`. Las instrucciones anteriores que reparten esa capacidad entre ambos repositorios quedan sustituidas. Los estados históricos siguientes no certifican este nuevo alcance como implementado.
+
+## Pendiente por cambio de alcance
+
+> 10 oct: implementado en IA; estado, evidencia y límites en [PLAN-CAMPANAS-Y-USUARIOS-2026-10-10.md](PLAN-CAMPANAS-Y-USUARIOS-2026-10-10.md#estado-de-implementación--10-de-octubre-de-2026) e inventario de la API en [INVENTARIO-API-CAMPANAS-2026-10-10.md](INVENTARIO-API-CAMPANAS-2026-10-10.md).
+
+- Revisar las modificaciones locales y commits de campañas existentes en la API principal, separándolos de identidad y correcciones financieras. No revertir commits mixtos ni borrar cambios ajenos automáticamente.
+- Implementar persistencia, reglas, reservas y usos de campañas en IA conforme al plan prioritario; sustituir el proxy actual de campañas financieras.
+- Verificar con lectura de código los contratos existentes para clientes, historial e importes. Documentar cualquier limitación que impida aplicar descuentos sin cambios en Brasper, antes de prometer integración completa.
+- Completar gestión de usuarios y accesos individuales; validar el recorrido IA→comprobante→asesor. El humano confirma pago y genera la transacción según el alcance indicado por el usuario.
+- No extender la implementación en la API principal por instrucciones históricas de este documento. Cualquier necesidad de modificarla requiere un alcance nuevo explícito.
+
 Actualizado: 10 de octubre de 2026 (Lima). Estado: **código local implementado en C1–C8 y corregidos los hallazgos de las tres revisiones** (R1, R2, lease, precisión del monto y escrituras tras perder el lease). **Pendiente:** validación en infraestructura real, UI del portal de punta a punta, ensayo de migración con históricos y reglas comerciales C1. Commits locales sin push; no desplegado. Ver [Estado actual](#estado-actual--10-de-octubre-de-2026).
 
 Este documento es la lista de ejecución actual para terminar el trabajo que no necesita cuentas, aprobaciones ni tráfico de terceros. Sustituye como lista de pendientes de código a las tablas históricas del [plan original](PLAN-ATENCION-AUTONOMA-2026-10.md), conservando su alcance. Las dependencias externas están en [otro plan](PLAN-DEPENDENCIAS-EXTERNAS-2026-10.md). Prompt de entrega: [PROMPT-AGENTE-CODIGO-2026-10.md](PROMPT-AGENTE-CODIGO-2026-10.md).

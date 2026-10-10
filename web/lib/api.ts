@@ -57,14 +57,37 @@ export async function api<T = unknown>(path: string, opts: RequestInit = {}): Pr
   return r.json() as Promise<T>;
 }
 
-export async function login(email: string, code?: string): Promise<{ token: string; user: Me }> {
+export async function login(email: string, password: string, code?: string): Promise<{ token: string; user: Me }> {
   const r = await fetch(API_BASE + "/api/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, code: code || undefined }),
+    body: JSON.stringify({ email, password: password || undefined, code: code || undefined }),
   });
-  if (!r.ok) throw new Error("Credenciales inválidas");
+  if (!r.ok) {
+    let detail: string | null = null;
+    try { detail = (await r.json()).detail; } catch { /* noop */ }
+    throw new Error(typeof detail === "string" && detail ? detail : "Credenciales inválidas");
+  }
   return r.json();
+}
+
+/** Qué pide el login: el campo de código solo existe mientras dura la transición. */
+export interface LoginOptions { password: boolean; legacy_code: boolean; dev_local: boolean }
+export async function loginOptions(): Promise<LoginOptions> {
+  try {
+    const r = await fetch(API_BASE + "/api/login/options");
+    if (r.ok) return r.json();
+  } catch { /* noop */ }
+  return { password: true, legacy_code: false, dev_local: false };
+}
+
+/** Cierra la sesión en el servidor (revoca el token) y la borra localmente. */
+export async function logout() {
+  const t = getToken();
+  if (t) {
+    try { await fetch(API_BASE + "/api/logout", { method: "POST", headers: { "X-Auth-Token": t } }); } catch { /* noop */ }
+  }
+  clearToken();
 }
 
 export const money = (n: number) =>
@@ -73,7 +96,8 @@ export const money = (n: number) =>
 // ---- tipos ----
 export interface Me {
   id: number; email: string; name: string; role: string;
-  tenant_scope: string | null; is_agency: boolean; permissions: string[];
+  tenant_scope?: string | null; is_agency?: boolean; permissions: string[];
+  active?: boolean; has_password?: boolean; must_change_password?: boolean;
 }
 export interface Tenant {
   id: string; name: string; vertical: string; fee_usd: number; cost_usd: number;

@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from core import access, auth, contacts, db, outbound
+from core import access, auth, contacts, db, outbound, users as users_mod
 
 router = APIRouter(prefix="/api")
 
@@ -15,13 +15,11 @@ class ScopeIn(BaseModel):
 
 @router.get("/admin/users")
 def users(user: dict = Depends(auth.require("users:read"))):
-    with db.connect() as con:
-        rows = [auth._row_to_user(r) for r in con.execute("SELECT * FROM panel_users ORDER BY id").fetchall()]
-    return {"users": [{**auth._public_user(u), "access_scope": access.scope_for(u)} for u in rows]}
+    return {"users": users_mod.list_users(), "roles": list(auth.ROLE_PERMS)}
 
 
 @router.put("/admin/users/{email}/scope")
-def set_scope(email: str, body: ScopeIn, user: dict = Depends(auth.require("users:write"))):
+def set_scope(email: str, body: ScopeIn, user: dict = Depends(auth.require_owner)):
     try:
         scope = access.set_scope(email, body.model_dump())
     except KeyError as exc:

@@ -172,8 +172,16 @@ def pre_process(state: AgentState) -> dict[str, Any]:
     checkout = (not is_quote) and _checkout_hit(state["text"])
     lead = db.get_lead_data(state["cid"])
     analysis["language"] = policies.detect_language(state["text"], fallback=lead.get("idioma", "es"))
+    evidence = policies.language_evidence(state["text"])
+    if evidence:
+        analysis["language"] = evidence
+    updates = {}
     if analysis["language"] != lead.get("idioma"):
-        lead = db.merge_lead_data(state["cid"], {"idioma": analysis["language"]})
+        updates["idioma"] = analysis["language"]
+    if evidence and evidence != lead.get("idioma_confirmado"):
+        updates["idioma_confirmado"] = evidence
+    if updates:
+        lead = db.merge_lead_data(state["cid"], updates)
     onboarding = (not is_quote) and lead_onboarding.needs_onboarding(
         lead, new_lead=bool(state.get("new_lead")), checkout=checkout, text=state["text"]
     )
@@ -243,14 +251,33 @@ def _route_after_preprocess(state: AgentState) -> str:
 def handle_onboarding(state: AgentState) -> dict[str, Any]:
     tenant = T.get_config()
     checkout = bool(state.get("analysis", {}).get("checkout"))
-    result = lead_onboarding.process(
-        state["cid"], state["text"], state.get("channel", "webchat"),
-        state["user_ref"], new_lead=bool(state.get("new_lead")), checkout=checkout,
-    )
+    lead = db.get_lead_data(state["cid"])
+    if (lead.get("offer_language_asked") and lead.get("onboarding_field")
+            and policies.language_choice(state["text"])):
+        # Respuesta a "¿español o português?": no es un dato del onboarding (p. ej. el nombre).
+        # Se repite la pregunta pendiente en el idioma elegido y se presenta la oferta.
+        language = state.get("analysis", {}).get("language", "es")
+        result = {"response": lead_onboarding._next_prompt(lead["onboarding_field"], language),
+                  "handoff": False, "usage": None}
+    else:
+        result = lead_onboarding.process(
+            state["cid"], state["text"], state.get("channel", "webchat"),
+            state["user_ref"], new_lead=bool(state.get("new_lead")), checkout=checkout,
+        )
     if result.get("ready_for_deposit"):
         deposit = _complete_deposit_accounts(state["cid"])
         result["response"] = f"{result['response']}\n\n{deposit['response']}"
         result["handoff"] = deposit["handoff"]
+    elif not result.get("handoff") and not result.get("banner"):
+        from . import campaign_offers
+        lead = db.get_lead_data(state["cid"])
+        offer = campaign_offers.welcome_offer(state["cid"], lead, state.get("analysis", {}).get("language", "es"),
+                                              language_known=bool(lead.get("idioma_confirmado")))
+        if offer.get("ask_language"):
+            result["response"] = f"{result['response']}\n\n{campaign_offers.ASK_LANGUAGE}"
+        elif offer.get("banner"):
+            result["response"] = f"{result['response']}\n\n{offer['banner']['text']}"
+            result["banner"] = offer["banner"]
     db.add_message(state["cid"], "assistant", result["response"])
     if (result.get("handoff") and
             db.conversation_status(state["cid"]) != "handoff"):
@@ -269,6 +296,14 @@ def _complete_deposit_accounts(cid: str, *,
     tenant = T.get_config()
     lead = db.get_lead_data(cid)
     reply, accounts = lead_onboarding.deposit_accounts_reply(lead)
+    if lead.get("ruta"):
+        from . import cases
+        opened = cases.open_case(cid)
+        if opened["status"] == "quote_expired":
+            # Montos/tasa ya no vigentes: no se acepta un snapshot vencido.
+            note = {"pt": "A sua cotação anterior venceu: antes de pagar, peça uma nova cotação para confirmar valores e taxa.",
+                    "es": "Tu cotización anterior venció: antes de pagar, pide una nueva cotización para confirmar montos y tasa."}
+            reply = f"{note['pt' if lead.get('idioma') == 'pt' else 'es']}\n\n{reply}"
     if persist_message:
         db.add_message(cid, "assistant", reply)
     if accounts:
@@ -465,13 +500,12 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
         db.add_message(state["cid"], "assistant", reply)
         observability.event("quote.clarify", conversation_id=state["cid"], missing=request["missing"])
         return {"response": reply, "handoff": False, "usage": None}
-    identity = None
     if _lead.get("brasper_user_id") and features.enabled("campaigns"):
-        history = lead_onboarding.refresh_history(state["cid"], state.get("channel", "webchat"), state["user_ref"])
-        if history:
-            identity = _lead
+        # Historial oficial cuando Brasper lo expone; si no, la elegibilidad queda sin confirmar.
+        lead_onboarding.refresh_history(state["cid"], state.get("channel", "webchat"), state["user_ref"])
+        _lead = db.get_lead_data(state["cid"])
     quote = quotes.compute(request["origin"], request["destination"],
-                           request["amount"], request["mode"], identity=identity)
+                           request["amount"], request["mode"])
     language = state.get("analysis", {}).get("language", "es")
     reply = quotes.reply(quote, language)
     tid, cid = tenant["id"], state["cid"]
@@ -508,9 +542,23 @@ def handle_quote(state: AgentState) -> dict[str, Any]:
     threshold = _high_amount_threshold()
     high = (not quote.get("error")) and bool(threshold) and float(request["amount"] or 0) >= threshold
     final = reply + ("\n\n" + _high_amount_note(language) if high else "")
-    banner = media_library.campaign_banner(quote, _lead, language) if identity and not quote.get("error") else None
-    if banner:
-        final += "\n\n" + banner["text"]
+    banner = None
+    if features.enabled("campaigns") and not quote.get("error"):
+        # Campaña de la plataforma IA para un cliente con elegibilidad confirmada. Informativa:
+        # exclusiva frente al cupón público (solo si ahorra más) y sin cambiar el cobro de Brasper.
+        from . import campaign_offers, campaigns
+        contact_id = (db.get_conversation(cid) or {}).get("contact_id")
+        match = campaigns.for_quote(_lead, request["origin"], request["destination"],
+                                    float(quote.get("amount_send") or 0), float(quote.get("commission_gross") or 0),
+                                    contact_id=contact_id)
+        if match and match["saving"] > float(quote.get("coupon_savings_amount") or 0):
+            applicable = campaigns.discount_applicable()
+            note, banner = campaign_offers.quote_offer(cid, match, language, request["origin"], applicable=applicable)
+            final += "\n\n" + note
+            db.merge_lead_data(cid, {"campaign_estimate": {
+                "campaign_id": match["campaign_id"], "version": match["version"], "saving": match["saving"],
+                "eligibility_source": match["eligibility_source"],
+                "state": "quoted" if applicable else "pending_advisor_confirmation"}})
     db.add_message(cid, "assistant", final)
     observability.event("quote.completed", conversation_id=cid,
                         ok=not quote.get("error"), origin=request["origin"],

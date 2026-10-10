@@ -47,6 +47,7 @@
         "tc_validity_minutes": 20,
         "high_amount_threshold": 5000
       },
+      "campaigns": { "discount_applicable": false },
       "onboarding": {
         "first_send_banner": {
           "enabled": true,

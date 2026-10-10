@@ -2,10 +2,11 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { api, login, getToken, clearToken, can, Me, ConversationsResp } from "@/lib/api";
+import { api, login, loginOptions, logout, getToken, clearToken, can, Me, ConversationsResp, LoginOptions } from "@/lib/api";
 import Icon from "./Icon";
 import Logo from "./Logo";
 import { ToastProvider } from "./Toast";
+import PasswordForm from "./PasswordForm";
 
 // ---------- contexto del usuario (lo consumen las páginas) ----------
 const MeCtx = createContext<Me | null>(null);
@@ -14,6 +15,7 @@ export const useMe = () => useContext(MeCtx);
 // Rutas públicas (sin login): documentos legales. Nunca redirigen al login.
 const PUBLIC_PATHS = ["/privacidad", "/terminos", "/eliminacion-de-datos"];
 
+// perm "" = cualquier usuario autenticado (p.ej. «Mi cuenta»).
 type NavItem = { href: string; label: string; icon: string; perm: string };
 const GROUPS: { sec: string; items: NavItem[] }[] = [
   { sec: "Operación", items: [
@@ -32,12 +34,17 @@ const GROUPS: { sec: string; items: NavItem[] }[] = [
     { href: "/integraciones", label: "Integraciones", icon: "puzzle", perm: "config:read" },
     { href: "/plantillas", label: "Plantillas", icon: "file", perm: "config:read" },
     { href: "/documentos", label: "Documentos públicos", icon: "tag", perm: "config:read" },
+    { href: "/usuarios", label: "Usuarios", icon: "users", perm: "users:read" },
     { href: "/accesos", label: "Accesos", icon: "puzzle", perm: "users:read" },
+  ]},
+  { sec: "Cuenta", items: [
+    { href: "/cuenta", label: "Mi cuenta", icon: "user", perm: "" },
   ]},
 ];
 const TITLES: Record<string, string> = {
   "/conversaciones": "Bandeja de conversaciones", "/ops": "Monitoreo y salud del servicio",
   "/conocimiento": "Conocimiento, herramientas y flags", "/documentos": "Documentos públicos y privacidad", "/accesos": "Accesos por canal, número y sector",
+  "/usuarios": "Usuarios, roles y sesiones",
 };
 
 // ---------- tema ----------
@@ -57,38 +64,63 @@ function applyTheme(t: Theme) {
 // ---------- login ----------
 function LoginScreen({ onLogin }: { onLogin: (m: Me) => void }) {
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
+  const [opts, setOpts] = useState<LoginOptions | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  useEffect(() => { loginOptions().then(setOpts); }, []);
   async function submit() {
     if (!email.trim() || busy) return;
     setBusy(true); setErr("");
     try {
-      const d = await login(email.trim(), code.trim());
+      const d = await login(email.trim(), password, code.trim());
       localStorage.setItem("cauce_token", d.token);
       onLogin(d.user);
     } catch (e) { setErr((e as Error).message); }
     setBusy(false);
   }
+  const enter = (e: React.KeyboardEvent) => { if (e.key === "Enter") submit(); };
   return (
     <div className="login-wrap">
       <div>
         <div className="login-box rise">
           <div className="brand"><span className="logo"><Logo /></span><div className="bt"><b>Brasper</b><small>Panel de operación</small></div></div>
           <h2>Hola de nuevo</h2>
-          <p className="muted" style={{ margin: "-6px 0 4px", fontSize: 13 }}>Ingresa con tu email de equipo.</p>
+          <p className="muted" style={{ margin: "-6px 0 4px", fontSize: 13 }}>Ingresa con tu correo y contraseña de equipo.</p>
           <label className="fld">Email
-            <input type="email" value={email} placeholder="tu@brasper.com" autoComplete="username" onChange={e => setEmail(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") submit(); }} />
+            <input type="email" value={email} placeholder="tu@brasper.com" autoComplete="username" onChange={e => setEmail(e.target.value)} onKeyDown={enter} />
           </label>
-          <label className="fld">Código de acceso
-            <input type="password" value={code} placeholder="••••••" autoComplete="current-password" onChange={e => setCode(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") submit(); }} />
+          <label className="fld">Contraseña
+            <input type="password" value={password} placeholder="••••••••••" autoComplete="current-password" onChange={e => setPassword(e.target.value)} onKeyDown={enter} />
           </label>
+          {opts?.legacy_code && (
+            <label className="fld">Código de acceso (solo si aún no tienes contraseña)
+              <input type="password" value={code} placeholder="••••••" autoComplete="off" onChange={e => setCode(e.target.value)} onKeyDown={enter} />
+            </label>
+          )}
+          {opts?.dev_local && <p className="muted" style={{ fontSize: 12, margin: 0 }}>Desarrollo local: los usuarios demo sin contraseña entran solo con el email.</p>}
           <button className="btn" onClick={submit} disabled={busy || !email.trim()}>{busy ? "Entrando…" : "Entrar"}</button>
-          {err && <div className="err">{err}</div>}
+          {err && <div className="err" role="alert">{err}</div>}
         </div>
         <div className="login-foot">Remesas Perú ↔ Brasil · uso interno · <a href="/privacidad" style={{ color: "#fff", textDecoration: "underline" }}>Privacidad</a></div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- contraseña temporal: hay que cambiarla antes de usar el panel ----------
+function ForcedPasswordChange({ me, onChanged, onExit }: { me: Me; onChanged: (m: Me) => void; onExit: () => void }) {
+  return (
+    <div className="login-wrap">
+      <div>
+        <div className="login-box rise">
+          <div className="brand"><span className="logo"><Logo /></span><div className="bt"><b>Brasper</b><small>Panel de operación</small></div></div>
+          <h2>Cambia tu contraseña</h2>
+          <p className="muted" style={{ margin: "-6px 0 4px", fontSize: 13 }}>{me.email} tiene una contraseña temporal. Elige una nueva para continuar.</p>
+          <PasswordForm me={me} onChanged={onChanged} />
+          <button className="btn btn-ghost" onClick={onExit}>Salir</button>
+        </div>
       </div>
     </div>
   );
@@ -161,8 +193,10 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
 
   if (loading) return <div className="login-wrap"><div style={{ color: "#fff", opacity: .8 }}>Cargando…</div></div>;
   if (!me) return <ToastProvider><LoginScreen onLogin={setMe} /></ToastProvider>;
+  if (me.must_change_password) return <ToastProvider><ForcedPasswordChange me={me} onChanged={setMe} onExit={() => { logout().finally(() => setMe(null)); }} /></ToastProvider>;
 
-  const allItems = GROUPS.flatMap(g => g.items).filter(i => can(me, i.perm));
+  const allowed = (i: NavItem) => !i.perm || can(me, i.perm);
+  const allItems = GROUPS.flatMap(g => g.items).filter(allowed);
   const title = TITLES[pathname] || allItems.find(i => i.href === pathname)?.label || "Panel";
   const isInbox = pathname === "/conversaciones";
   const badgeFor = (href: string) => (href === "/conversaciones" && queue > 0 ? <span className="badge" title="Esperando asesor">{queue}</span> : null);
@@ -178,7 +212,7 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
             </div>
             <nav className="nav" aria-label="Secciones">
               {GROUPS.map(g => {
-                const items = g.items.filter(i => can(me, i.perm));
+                const items = g.items.filter(allowed);
                 if (!items.length) return null;
                 return (
                   <div key={g.sec}>
@@ -217,7 +251,7 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
                 <button className="ibtn" onClick={toggleRail} title={rail ? "Expandir menú" : "Compactar menú"} aria-label="Compactar menú">
                   <Icon name="panel" />
                 </button>
-                <button className="ibtn" onClick={() => { clearToken(); setMe(null); }} title="Salir" aria-label="Salir">
+                <button className="ibtn" onClick={() => { logout().finally(() => setMe(null)); }} title="Salir" aria-label="Salir">
                   <Icon name="logout" />
                 </button>
               </div>

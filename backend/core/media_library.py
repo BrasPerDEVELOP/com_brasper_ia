@@ -173,4 +173,9 @@ async def deliver(cid, channel, recipient, banner, connection=None):
         idempotency.complete_write(key, result)
     except Exception:
         observability.event("campaign.media_delivery", conversation_id=cid, sent=False, reason="result_unpersisted")
+    try:
+        from . import campaign_offers
+        campaign_offers.mark_delivery(key, result)
+    except Exception:  # noqa: BLE001 - el registro de la oferta no bloquea la conversación
+        observability.event("campaign.offer_state_unpersisted", conversation_id=cid)
     observability.event("campaign.media_delivery", conversation_id=cid, **result)

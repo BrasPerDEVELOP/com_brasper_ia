@@ -2099,16 +2099,21 @@ def case_campaign_quote_and_admin_permissions():
         assert quotes.compute("PEN", "BRL", 500, identity=identity).get("error"), "no aceptar cifras incoherentes"
         brasper_api.personalized_quote = lambda *args, **kwargs: {"ok": False}
         assert quotes.compute("PEN", "BRL", 500, identity=identity).get("error"), "sin fallback a promo local"
+        # Diseño 10 oct: la administración vive en la plataforma IA; ninguna llamada a la API financiera.
         calls = []
         def upstream(*args, **kwargs):
             calls.append((args, kwargs))
-            return {"ok": True, "data": {"id": str(uuid4()), "version": 1}}
+            return {"ok": False}
         brasper_api._integration_request = upstream
-        response = _client().post("/api/admin/campaigns", headers=AGENT, json={"draft": {}})
-        assert response.status_code == 403 and not calls
-        response = _client().post("/api/admin/campaigns", headers=OWNER, json={"draft": {}})
-        assert response.status_code == 200 and calls[0][1]["admin"] is True
-        assert calls[0][1]["json"]["actor"] == "owner@agencia.com"
+        draft = {"name": "Admin check", "discount_percentage": 20, "max_uses": 5, "routes": ["PEN_BRL"],
+                 "start_date": "2026-01-01T00:00:00+00:00", "end_date": "2099-01-01T00:00:00+00:00",
+                 "campaign_rules": {"segment": "all", "messages": {"es": {"text": "ES"}, "pt": {"text": "PT"}}}}
+        response = _client().post("/api/admin/campaigns", headers=AGENT, json={"draft": draft})
+        assert response.status_code == 403
+        response = _client().post("/api/admin/campaigns", headers=OWNER, json={"draft": draft})
+        assert response.status_code == 200 and response.json()["code"].startswith("CAMP-"), response.text
+        assert not calls, "la campaña se guarda en IA, no en la API financiera"
+        assert _client().post("/api/admin/campaigns", headers=OWNER, json={"draft": {}}).status_code == 422
     finally:
         brasper_api.enabled, brasper_api.personalized_quote, brasper_api._integration_request = saved
 
@@ -2187,6 +2192,8 @@ def main() -> int:
     from access_checks import access_checks
     from service_auth_checks import service_auth_checks
     from lock_checks import lock_checks
+    from campaign_offer_checks import campaign_offer_checks, campaign_lifecycle_checks, case_and_rules_checks
+    from user_checks import user_checks
     check("1. config single-tenant Brasper (secretos por env, prompt con reglas)", case_config_single_tenant)
     check("2. persistencia + orden cronologico", case_persistence_order)
     check("3. conversacion se reutiliza por usuario/canal; closed abre nueva", case_conversation_reuse)
@@ -2266,6 +2273,10 @@ def main() -> int:
     check("73. Alcance por canal/numero/sector, comprobantes privados y asignacion con permisos", lambda: access_checks(_client(), OWNER))
     check("74. Cuenta de servicio: JWT + secreto, re-login unico ante 401 del middleware, sin confundir 401 de ruta", service_auth_checks)
     check("75. Lock comun en base: sin base no se procesa, Redis mixto excluye y lease vencido no entrega", lock_checks)
+    check("76. Usuarios: solo owner gestiona, ultimo owner protegido (concurrente), desactivacion, contrasenas, sesiones y compatibilidad", lambda: user_checks(_client(), OWNER))
+    check("77. Campanas IA: oferta de bienvenida ES/PT, idioma incierto, imagen del idioma y sin repetir", campaign_offer_checks)
+    check("78. Campanas IA: versiones, publicacion, rutas, cupos, primer envio unico, concurrencia e importacion", campaign_lifecycle_checks)
+    check("79. Expediente IA, descuento no prometido sin procedimiento verificado, vencimiento conciliado y estados de oferta", case_and_rules_checks)
     failed = 0
     for name, ok, detail in _RESULTS:
         status = "PASS" if ok else "FAIL"

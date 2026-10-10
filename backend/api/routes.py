@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core import db, engine, whatsapp, connectors, wa_templates, auth, telegram, rate_limit, redis_runtime, jobs, debounce, observability, alerts, audio_adapter, util, brasper_api, llm
 from core import audio_flow, features, handoff_summary, idempotency, knowledge, presence, public_docs, tool_contracts
@@ -247,6 +247,8 @@ async def _handle_whatsapp_media(tenant: dict, msg: dict, user_ref: str, conn: d
         return {"tenant": tenant["id"], "from": msg["from"], "resolved": True,
                 "media": kind, "sent": sent, "ignored": True}
     db.merge_lead_data(cid, {"commercial_stage": "proof_received", "proof_validated": False})
+    from core import cases
+    cases.attach_proof(cid, media)  # evidencia para el asesor; nunca confirma el pago
     if db.conversation_status(cid) != "handoff":
         # Comprobante -> lo valida un humano en el sistema: pausa el bot y asigna asesor.
         db.set_conversation_status(cid, "handoff")
@@ -778,6 +780,8 @@ def conversation_assign(conversation_id: str, body: AssignIn,
     target = auth.user_from_email(email) if email else None
     if email and not target:
         raise HTTPException(status_code=422, detail=f"Usuario '{email}' no existe en el panel")
+    if target and not target.get("active", True):
+        raise HTTPException(status_code=422, detail=f"Usuario '{email}' está desactivado")
     conv = db.get_conversation(conversation_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
@@ -1328,8 +1332,9 @@ def admin_deletion_status(req_id: int, body: DeletionStatusIn, user: dict = Depe
 
 # ---------- auth / panel interno ----------
 class LoginIn(BaseModel):
-    email: str
-    code: str | None = None
+    email: str = Field(max_length=254)
+    password: str | None = Field(default=None, max_length=256)
+    code: str | None = Field(default=None, max_length=256)   # PANEL_LOGIN_CODE (transición)
 
 
 @router.post("/api/login")
@@ -1337,14 +1342,15 @@ def login(body: LoginIn, request: Request):
     rate_limit.check(request, "login", limit=10)
     host = request.client.host if request.client else ""
     local_request = host in {"127.0.0.1", "::1", "localhost", "testclient"}
-    res = auth.login(body.email, code=body.code, local_request=local_request)
+    res = auth.login(body.email, code=body.code, password=body.password,
+                     local_request=local_request, ip=host)
     if not res:
-        raise HTTPException(status_code=401, detail="Credenciales inválidas o PANEL_LOGIN_CODE no configurado")
+        raise HTTPException(status_code=401, detail="Correo, contraseña o código incorrectos, o cuenta desactivada")
     return res
 
 
 @router.get("/api/me")
-def me(user: dict = Depends(auth.current_user)):
+def me(user: dict = Depends(auth.current_user_pending_ok)):
     return auth._public_user(user)
 
 

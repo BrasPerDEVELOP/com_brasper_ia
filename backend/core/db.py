@@ -385,6 +385,11 @@ def init_db() -> None:
     channel_events.ensure_schema()
     from . import access
     access.ensure_schema()
+    from . import campaign_offers, campaigns
+    campaign_offers.ensure_schema()
+    campaigns.ensure_schema()
+    from . import cases
+    cases.ensure_schema()
     from . import contacts
     contacts.ensure_schema()
     contacts.backfill()

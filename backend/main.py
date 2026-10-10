@@ -15,6 +15,7 @@ from api.campaigns import router as campaigns_router
 from api.media_library import router as media_library_router
 from api.engagement import router as engagement_router
 from api.access import router as access_router
+from api.users import router as users_router
 from core import auth, db, llm, tenants, util
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(message)s")
@@ -87,3 +88,4 @@ app.include_router(campaigns_router)
 app.include_router(media_library_router)
 app.include_router(engagement_router)
 app.include_router(access_router)
+app.include_router(users_router)

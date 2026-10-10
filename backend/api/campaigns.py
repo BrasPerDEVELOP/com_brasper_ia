@@ -1,19 +1,14 @@
-"""Panel administration proxy; financial rules remain in the official API."""
-from uuid import UUID
+"""Administración de campañas en la plataforma IA (persistencia propia, sin proxy financiero).
+
+Crear, editar, publicar y desactivar: `tenants:write`. Reservar, consumir o liberar un
+beneficio de una conversación: `conversations:write` con alcance sobre esa conversación.
+"""
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
-from core import auth, brasper_api, db, tenants, media_library
+from pydantic import BaseModel, Field, ValidationError
 
-router = APIRouter(prefix="/api/admin/campaigns")
+from core import auth, campaigns, cases, db
 
-
-def upstream(method, suffix="", body=None):
-    kwargs = {"json": body} if body is not None else {}
-    result = brasper_api._integration_request(tenants.get_config(), method,
-                "/brasper/ai/admin/campaigns" + suffix, admin=True, **kwargs)
-    if not result.get("ok"):
-        raise HTTPException(result.get("status", 503), result.get("error", "API de campañas no disponible"))
-    return result["data"]
+router = APIRouter(prefix="/api/admin")
 
 
 class SaveIn(BaseModel):
@@ -25,46 +20,177 @@ class PublishIn(BaseModel):
     version: int = Field(ge=1)
 
 
-@router.get("")
+class ReserveIn(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=40)
+    operation_ref: str = Field(min_length=2, max_length=80)
+    advisor_verified: bool = False
+
+
+def _call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except campaigns.Conflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(404, str(exc.args[0] if exc.args else exc)) from exc
+    except ValidationError as exc:
+        raise HTTPException(422, "; ".join(e["msg"].removeprefix("Value error, ") for e in exc.errors())) from exc
+    except ValueError as exc:  # incluye BenefitRejected
+        raise HTTPException(422, str(exc)) from exc
+
+
+def _draft(raw: dict) -> campaigns.CampaignDraft:
+    return _call(campaigns.CampaignDraft.model_validate, raw)
+
+
+@router.get("/campaigns")
 def index(user=Depends(auth.require("config:read"))):
-    return upstream("GET")
+    return {"campaigns": campaigns.inventory()}
 
 
-@router.get("/{campaign_id}/history")
-def history(campaign_id: UUID, user=Depends(auth.require("config:read"))):
-    return upstream("GET", f"/{campaign_id}/history")
+@router.get("/campaigns/routes")
+def routes(user=Depends(auth.require("config:read"))):
+    """Rutas con tipo de cambio publicado por Brasper; el panel no asume combinaciones."""
+    return {"routes": campaigns.available_routes()}
 
 
-@router.post("")
+@router.get("/campaigns/{campaign_id}/history")
+def history(campaign_id: str, user=Depends(auth.require("config:read"))):
+    return {"versions": _call(campaigns.history, campaign_id)}
+
+
+@router.post("/campaigns")
 def create(body: SaveIn, user=Depends(auth.require("tenants:write"))):
-    result = upstream("POST", body={**body.model_dump(), "actor": user["email"]})
+    result = _call(campaigns.save, _draft(body.draft), user["email"], None, body.expected_version)
     db.add_audit_event(user["email"], "campaign.draft", f"campaign:{result['id']}", {"version": result["version"]})
     return result
 
 
-@router.put("/{campaign_id}")
-def save(campaign_id: UUID, body: SaveIn, user=Depends(auth.require("tenants:write"))):
-    result = upstream("PUT", f"/{campaign_id}", {**body.model_dump(), "actor": user["email"]})
+@router.put("/campaigns/{campaign_id}")
+def save(campaign_id: str, body: SaveIn, user=Depends(auth.require("tenants:write"))):
+    result = _call(campaigns.save, _draft(body.draft), user["email"], campaign_id, body.expected_version)
     db.add_audit_event(user["email"], "campaign.draft", f"campaign:{campaign_id}", {"version": result["version"]})
     return result
 
 
-@router.post("/{campaign_id}/publish")
-def publish(campaign_id: UUID, body: PublishIn, user=Depends(auth.require("tenants:write"))):
-    history = upstream("GET", f"/{campaign_id}/history")
-    saved = next((v for v in history["versions"] if v["version"] == body.version), None)
-    if not saved:
-        raise HTTPException(404, "Versión no encontrada")
-    for language, copy in saved["draft"]["campaign_rules"]["messages"].items():
-        if copy.get("media_id") and not media_library.approved(copy["media_id"], language):
-            raise HTTPException(422, f"La imagen de {language} debe estar aprobada para promociones en ese idioma")
-    result = upstream("POST", f"/{campaign_id}/publish", {**body.model_dump(), "actor": user["email"]})
+@router.post("/campaigns/{campaign_id}/publish")
+def publish(campaign_id: str, body: PublishIn, user=Depends(auth.require("tenants:write"))):
+    result = _call(campaigns.publish, campaign_id, body.version, user["email"])
     db.add_audit_event(user["email"], "campaign.publish", f"campaign:{campaign_id}", body.model_dump())
     return result
 
 
-@router.post("/{campaign_id}/disable")
-def disable(campaign_id: UUID, user=Depends(auth.require("tenants:write"))):
-    result = upstream("POST", f"/{campaign_id}/disable")
+@router.post("/campaigns/{campaign_id}/disable")
+def disable(campaign_id: str, user=Depends(auth.require("tenants:write"))):
+    result = _call(campaigns.disable, campaign_id)
     db.add_audit_event(user["email"], "campaign.disable", f"campaign:{campaign_id}", {})
     return result
+
+
+@router.get("/campaigns/{campaign_id}/benefits")
+def campaign_benefits(campaign_id: str, user=Depends(auth.require("config:read"))):
+    return {"benefits": campaigns.benefits(campaign_id=campaign_id)}
+
+
+def _conversation_for(user: dict, conversation_id: str) -> dict:
+    from api.routes import _assert_conversation_access
+    conv = db.get_conversation(conversation_id)
+    if not conv:
+        raise HTTPException(404, "Conversación no encontrada")
+    _assert_conversation_access(user, conv)
+    return conv
+
+
+@router.get("/conversations/{conversation_id}/campaign-benefits")
+def conversation_benefits(conversation_id: str, user=Depends(auth.require("conversations:read"))):
+    _conversation_for(user, conversation_id)
+    return {"benefits": campaigns.benefits(conversation_id=conversation_id),
+            "eligibility": campaigns.eligibility(db.get_lead_data(conversation_id))}
+
+
+@router.post("/campaigns/{campaign_id}/benefits")
+def reserve(campaign_id: str, body: ReserveIn, user=Depends(auth.require("conversations:write"))):
+    _conversation_for(user, body.conversation_id)
+    result = _call(campaigns.reserve, campaign_id, body.conversation_id, body.operation_ref, user["email"],
+                   advisor_verified=body.advisor_verified)
+    db.add_audit_event(user["email"], "campaign.benefit_reserved", f"campaign:{campaign_id}",
+                       {"benefit_id": result["id"], "operation_ref": body.operation_ref,
+                        "eligibility_source": result["eligibility_source"]})
+    return result
+
+
+def _benefit_conversation(user: dict, benefit_id: str) -> None:
+    row = campaigns.benefit(benefit_id)
+    if not row:
+        raise HTTPException(404, "Beneficio no encontrado")
+    if row.get("conversation_id"):
+        _conversation_for(user, row["conversation_id"])
+
+
+@router.post("/campaign-benefits/{benefit_id}/consume")
+def consume(benefit_id: str, user=Depends(auth.require("conversations:write"))):
+    _benefit_conversation(user, benefit_id)
+    result = _call(campaigns.consume, benefit_id, user["email"])
+    db.add_audit_event(user["email"], "campaign.benefit_consumed", f"campaign_benefit:{benefit_id}", {})
+    return result
+
+
+@router.post("/campaign-benefits/{benefit_id}/release")
+def release(benefit_id: str, user=Depends(auth.require("conversations:write"))):
+    _benefit_conversation(user, benefit_id)
+    result = _call(campaigns.release, benefit_id, user["email"])
+    db.add_audit_event(user["email"], "campaign.benefit_released", f"campaign_benefit:{benefit_id}", {})
+    return result
+
+
+class RegisterIn(BaseModel):
+    operation_ref: str = Field(min_length=2, max_length=80)
+
+
+class ExpireIn(BaseModel):
+    note: str = Field(min_length=3, max_length=500)
+
+
+@router.post("/campaign-benefits/{benefit_id}/expire")
+def expire(benefit_id: str, body: ExpireIn, user=Depends(auth.require("conversations:write"))):
+    _benefit_conversation(user, benefit_id)
+    result = _call(campaigns.expire, benefit_id, user["email"], body.note)
+    db.add_audit_event(user["email"], "campaign.benefit_expired", f"campaign_benefit:{benefit_id}", {})
+    return result
+
+
+@router.get("/campaign-benefits/{benefit_id}/transitions")
+def benefit_transitions(benefit_id: str, user=Depends(auth.require("conversations:read"))):
+    _benefit_conversation(user, benefit_id)
+    return {"transitions": campaigns.transitions(benefit_id)}
+
+
+@router.get("/conversations/{conversation_id}/case")
+def conversation_case(conversation_id: str, user=Depends(auth.require("conversations:read"))):
+    _conversation_for(user, conversation_id)
+    return {"case": cases.view(cases.active_case(conversation_id))}
+
+
+def _case_for(user: dict, case_id: str) -> dict:
+    case = cases.get(case_id)
+    if not case:
+        raise HTTPException(404, "Expediente no encontrado")
+    _conversation_for(user, case["conversation_id"])
+    return case
+
+
+@router.post("/cases/{case_id}/register")
+def register_case(case_id: str, body: RegisterIn, user=Depends(auth.require("conversations:write"))):
+    _case_for(user, case_id)
+    result = _call(cases.register, case_id, body.operation_ref, user["email"])
+    db.add_audit_event(user["email"], "case.registered", f"case:{case_id}", {"operation_ref": body.operation_ref})
+    return {"case": cases.view(result)}
+
+
+@router.post("/cases/{case_id}/close")
+def close_case(case_id: str, cancelled: bool = False, user=Depends(auth.require("conversations:write"))):
+    _case_for(user, case_id)
+    result = _call(cases.close, case_id, user["email"], cancelled)
+    db.add_audit_event(user["email"], "case.cancelled" if cancelled else "case.closed", f"case:{case_id}", {})
+    return {"case": cases.view(result)}
+

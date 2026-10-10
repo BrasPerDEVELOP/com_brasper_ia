@@ -264,6 +264,8 @@ async def _handle_incoming_media(chat_id, msg: dict) -> dict:
         await send_message(chat_id, note)
         return {"handled": True, "media": media["kind"], "ignored": True}
     db.merge_lead_data(cid, {"commercial_stage": "proof_received"})
+    from . import cases
+    cases.attach_proof(cid, media)  # evidencia para el asesor; nunca confirma el pago
     observability.event("message.media_received", tenant_id=tenant["id"],
                         conversation_id=cid, kind=media["kind"])
     status = db.conversation_status(cid)

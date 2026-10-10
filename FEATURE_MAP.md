@@ -49,6 +49,10 @@ Fallo del LLM → `llm_failed`: respuesta cortés + handoff (el bot nunca queda 
 | Creación concurrente de conversación única; lock en DB si Redis cae | `db._creation_lock`, `db_lock` | 71 |
 | Salidas enviado/cancelado/incierto/fallido; estados que solo avanzan; ecos diferidos | `outbound`, `channel_events`, `coex` | 72 |
 | Alcance por canal/número/sector; comprobantes con `media:private` | `access` | 73 |
+| Usuarios: contraseñas individuales, temporales con cambio obligatorio, sesiones revocables, último owner protegido | `users`, `auth` | 76 |
+| Promociones en IA: oferta de bienvenida ES/PT, idioma incierto, sin repetir | `campaign_offers` | 77 |
+| Promociones en IA: versiones, rutas, cupos, primer envío único por identidad, concurrencia, importación | `campaigns` | 78 |
+| Expediente IA, descuento no prometido sin procedimiento verificado, vencimiento conciliado | `cases`, `campaigns` | 79 |
 | Job de seguimiento reclamado y caído → incierto (nunca se reenvía) | `engagement.dispatch_one` | 67 |
 
 ## Endpoints API

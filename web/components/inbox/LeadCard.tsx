@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import type { Advisor, Conversation, HandoffSummary, Note } from "@/lib/api";
 import { chanOf, displayName, formatRef, LEAD_LABELS, leadStr, relTime, shortEmail, statusLabel, type Lead } from "@/lib/format";
@@ -32,6 +32,94 @@ function DeliveryIssues({ conversationId }: { conversationId: string }) {
     <div className="psec">
       <h4><Icon name="clock" /> Envíos del bot sin confirmar</h4>
       <ul>{items.slice(0, 5).map(d => <li key={d.id}><span className={`tag ${d.state === "cancelled" ? "" : "warn"}`}>{DELIVERY_TAG[d.state]}</span> {DELIVERY_LABEL[d.state]} · {relTime(d.created_at)}</li>)}</ul>
+    </div>
+  );
+}
+
+type Benefit = { id: string; campaign_id: string; operation_ref: string; state: string; eligibility_source: string; created_at: string };
+type CampaignItem = { id: string; code: string; active: boolean; published_version: number | null; draft: { name: string; discount_percentage: number } };
+type Eligibility = { first_transfer: boolean | null; returning: boolean | null; source: string };
+const BENEFIT_STATE: Record<string, string> = { reserved: "Reservado", consumed: "Consumido", released: "Liberado", expired: "Vencido" };
+type CaseView = { id: string; status: string; operation_ref: string | null; quote: Record<string, unknown>; campaign: { saving?: number; state?: string } | null;
+  proofs: { provider: string; ref: string; kind?: string; received_at: string }[]; pending: string[]; accepted_at: string };
+const CASE_STATE: Record<string, string> = { accepted: "Cotización aceptada", proof_received: "Comprobante recibido", registered: "Registrada en Brasper" };
+
+/** Expediente IA: cotización aceptada + comprobantes para el asesor. No confirma pagos. */
+function CaseFile({ conversationId, canWrite }: { conversationId: string; canWrite: boolean }) {
+  const [item, setItem] = useState<CaseView | null>(null);
+  const [ref, setRef] = useState("");
+  const [msg, setMsg] = useState("");
+  const load = useCallback(() => api<{ case: CaseView | null }>(`/api/admin/conversations/${conversationId}/case`).then(d => setItem(d.case)).catch(() => setItem(null)), [conversationId]);
+  useEffect(() => { load(); }, [load]);
+  if (!item) return null;
+  const q = item.quote as { ruta?: string; monto_enviar?: number; monto_recibir?: number; tasa?: number };
+  async function post(path: string, body?: object) {
+    setMsg("");
+    try { await api(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }); setRef(""); await load(); }
+    catch (e) { setMsg((e as Error).message); }
+  }
+  return (
+    <div className="psec">
+      <h4><Icon name="file" /> Expediente · {CASE_STATE[item.status] ?? item.status}</h4>
+      <div>{q.ruta} · envía {q.monto_enviar} · recibe {q.monto_recibir} · tasa {q.tasa}</div>
+      {item.campaign?.saving != null && <div className="muted">Promoción: ahorro estimado {item.campaign.saving} ({item.campaign.state === "quoted" ? "ofrecido" : "pendiente de confirmar"})</div>}
+      <div className="muted">Comprobantes: {item.proofs.length || "ninguno"}{item.proofs.length > 0 && " · revisar en el hilo; un comprobante no confirma el pago"}</div>
+      {item.operation_ref && <div>Referencia Brasper: <code>{item.operation_ref}</code></div>}
+      {item.pending.length > 0 && <ul>{item.pending.map(p => <li key={p}>{p}</li>)}</ul>}
+      {canWrite && ["accepted", "proof_received"].includes(item.status) && <form onSubmit={e => { e.preventDefault(); post(`/api/admin/cases/${item.id}/register`, { operation_ref: ref.trim() }); }}>
+        <input aria-label="Referencia oficial de la operación" required placeholder="Ref. oficial (PxB-...)" value={ref} onChange={e => setRef(e.target.value)} />
+        <button className="btn" disabled={!ref.trim()}>Registrar referencia</button>
+      </form>}
+      {msg && <p role="alert" className="usage-note">{msg}</p>}
+    </div>
+  );
+}
+
+/** Beneficios de campaña de esta conversación: el asesor reserva al registrar la operación
+ *  en Brasper y la marca consumida (completada) o liberada (fallida/cancelada). */
+function CampaignBenefits({ conversationId, canWrite }: { conversationId: string; canWrite: boolean }) {
+  const [benefits, setBenefits] = useState<Benefit[]>([]);
+  const [elig, setElig] = useState<Eligibility | null>(null);
+  const [campaigns, setCampaigns] = useState<CampaignItem[]>([]);
+  const [campaignId, setCampaignId] = useState("");
+  const [operation, setOperation] = useState("");
+  const [verified, setVerified] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    const d = await api<{ benefits: Benefit[]; eligibility: Eligibility }>(`/api/admin/conversations/${conversationId}/campaign-benefits`);
+    setBenefits(d.benefits); setElig(d.eligibility);
+  }, [conversationId]);
+  useEffect(() => {
+    load().catch(() => setBenefits([]));
+    api<{ campaigns: CampaignItem[] }>("/api/admin/campaigns").then(d => setCampaigns(d.campaigns.filter(c => c.active && c.published_version))).catch(() => setCampaigns([]));
+  }, [load]);
+  async function run(path: string, body?: object) {
+    setBusy(true); setMsg("");
+    try { await api(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }); await load(); setOperation(""); setVerified(false); }
+    catch (e) { setMsg((e as Error).message); }
+    finally { setBusy(false); }
+  }
+  if (!campaigns.length && !benefits.length) return null;
+  const unconfirmed = elig?.source === "insufficient";
+  return (
+    <div className="psec">
+      <h4><Icon name="tag" /> Promociones</h4>
+      {elig && <p className="muted">Elegibilidad según Brasper: {unconfirmed ? "no confirmable con los datos disponibles" : `primer envío ${elig.first_transfer ? "sí" : elig.first_transfer === false ? "no" : "sin dato"}`}</p>}
+      <ul>{benefits.map(b => <li key={b.id}>
+        <span className={`tag ${b.state === "reserved" ? "warn" : ""}`}>{BENEFIT_STATE[b.state] ?? b.state}</span> {campaigns.find(c => c.id === b.campaign_id)?.draft.name ?? "Campaña"} · {b.operation_ref}
+        {canWrite && b.state === "reserved" && <> <button className="btn ghost" disabled={busy} onClick={() => run(`/api/admin/campaign-benefits/${b.id}/consume`)}>Operación completada</button>
+          <button className="btn ghost" disabled={busy} onClick={() => run(`/api/admin/campaign-benefits/${b.id}/release`)}>Falló o se canceló</button>
+          <button className="btn ghost" disabled={busy} onClick={() => { const note = window.prompt("¿Cómo se concilió el vencimiento? Ej.: la operación nunca se registró en Brasper"); if (note) run(`/api/admin/campaign-benefits/${b.id}/expire`, { note }); }}>Vencida</button></>}
+      </li>)}</ul>
+      {canWrite && campaigns.length > 0 && <form onSubmit={e => { e.preventDefault(); run(`/api/admin/campaigns/${campaignId}/benefits`, { conversation_id: conversationId, operation_ref: operation.trim(), advisor_verified: verified }); }}>
+        <select aria-label="Promoción" required value={campaignId} onChange={e => setCampaignId(e.target.value)}>
+          <option value="">Elegir promoción…</option>{campaigns.map(c => <option key={c.id} value={c.id}>{c.draft.name} · {c.draft.discount_percentage}%</option>)}</select>
+        <input aria-label="Referencia de la operación en Brasper" required placeholder="Ref. operación (PxB-…)" value={operation} onChange={e => setOperation(e.target.value)} />
+        {unconfirmed && <label><input type="checkbox" checked={verified} onChange={e => setVerified(e.target.checked)} /> Verifiqué el historial de envíos en Brasper</label>}
+        <button className="btn" disabled={busy || !campaignId || !operation.trim()}>Reservar beneficio</button>
+      </form>}
+      {msg && <p role="alert" className="usage-note">{msg}</p>}
     </div>
   );
 }
@@ -73,6 +161,8 @@ export default function LeadCard({ c, lead, notes, tags, advisors, load, canAssi
       </div>
 
       <DeliveryIssues conversationId={c.id} />
+      <CaseFile conversationId={c.id} canWrite={canAssign} />
+      <CampaignBenefits conversationId={c.id} canWrite={canAssign} />
 
       {handoff && c.status === "handoff" && (
         <div className="psec">

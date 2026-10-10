@@ -114,6 +114,39 @@ def _tokens(text: str) -> set:
 
 # --- API publica ------------------------------------------------------------
 
+_LANGUAGE_CHOICES = {"portugues": "pt", "em portugues": "pt", "portuguese": "pt", "pt": "pt",
+                     "espanol": "es", "en espanol": "es", "castellano": "es", "spanish": "es", "es": "es"}
+
+
+def language_choice(text: str) -> str | None:
+    """Mensaje que SOLO elige idioma ('português', 'en español'); None si dice algo más.
+
+    >>> language_choice("Português!"), language_choice("quero enviar")
+    ('pt', None)
+    """
+    return _LANGUAGE_CHOICES.get(_normalize_text(text).strip(" .!?"))
+
+
+def language_evidence(text: str) -> str | None:
+    """'es' | 'pt' solo con señales claras (palabras propias o elección explícita); None si no.
+
+    >>> language_evidence("Olá, quero enviar dinheiro")
+    'pt'
+    >>> language_evidence("português") , language_evidence("Español")
+    ('pt', 'es')
+    >>> language_evidence("Ana Silva 12345678") is None
+    True
+    """
+    choice = language_choice(text)
+    if choice:
+        return choice
+    toks = _tokens(text)
+    pt, es = len(toks & _PT_MARKERS), len(toks & _ES_MARKERS)
+    if pt == es:
+        return None
+    return "pt" if pt > es else "es"
+
+
 def detect_language(text: str, fallback: str = "es") -> str:
     """Detecta idioma por marcadores; devuelve 'es' | 'pt' | 'en' (default 'es').
 

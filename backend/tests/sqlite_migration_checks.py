@@ -33,7 +33,7 @@ def run():
         command.upgrade(config, "head")
         command.upgrade(config, "head")
         with sqlite3.connect(path) as con:
-            assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0011_tenant_column_leftovers"
+            assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0013_ia_campaigns"
             assert con.execute("SELECT status,human_revision FROM conversations WHERE id='synthetic-history'").fetchone() == ("handoff", 0)
             assert con.execute("SELECT content FROM messages WHERE conversation_id='synthetic-history'").fetchone()[0] == "Synthetic evidence"
             assert "tenant_id" not in {c[1] for c in con.execute("PRAGMA table_info(conversations)")}
@@ -46,13 +46,16 @@ def run():
                         "scheduled_for, status, metadata, created_at, updated_at) "
                         "VALUES (NULL,'u','Synthetic',NULL,'x','2026-10-02','scheduled',NULL,'2026-10-01','2026-10-01')")
             tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            assert {"contacts", "contact_aliases", "contact_conflicts", "identity_grants", "conversation_locks"} <= tables
+            assert {"contacts", "contact_aliases", "contact_conflicts", "identity_grants", "conversation_locks",
+                    "campaigns", "campaign_versions", "campaign_benefits", "first_transfer_claims", "campaign_offers"} <= tables
+            assert "panel_sessions" in tables
+            assert {"password_hash", "active", "must_change_password"} <= {c[1] for c in con.execute("PRAGMA table_info(panel_users)")}
             con.commit()
             with sqlite3.connect(root / "restored.db") as restored:
                 con.backup(restored)
                 assert restored.execute("SELECT content FROM messages").fetchall() == con.execute("SELECT content FROM messages").fetchall()
                 assert restored.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        print("PASS: SQLite 0006 to 0011, historical evidence preserved, repeat migration and backup/restore")
+        print("PASS: SQLite 0006 to 0013, historical evidence preserved, repeat migration and backup/restore")
     finally:
         if previous is None: os.environ.pop("DATABASE_URL", None)
         else: os.environ["DATABASE_URL"] = previous

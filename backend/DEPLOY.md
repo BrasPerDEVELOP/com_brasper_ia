@@ -21,7 +21,7 @@ Completa como minimo:
 | `DEEPSEEK_API_KEY` | Si | LLM por defecto de Brasper |
 | `PANEL_ADMIN_EMAIL` | Si | Owner inicial |
 | `PANEL_ADMIN_TOKEN` | Si | Token opaco del owner |
-| `PANEL_LOGIN_CODE` | Si | Codigo temporal de login |
+| `PANEL_LOGIN_CODE` | Transicion | Codigo de login solo para usuarios sin contraseña; vaciar cuando todos tengan una (RUNBOOK §1.5) |
 | `SITE_ADDRESS` | Si (prod) | Dominio del panel/API para Caddy + TLS (en `.env` de la raíz) |
 | `CORS_ALLOW_ORIGINS` | No* | *Panel y API van en el mismo dominio (mismo origen) → CORS no aplica. Solo si sirves el panel en otro host |
 | `META_APP_SECRET` | Canal WA | Firma de WhatsApp |
@@ -116,7 +116,7 @@ Con `APP_ENV=production`:
 
 - No se siembran usuarios demo.
 - Se purgan tokens demo si existian.
-- Login siempre exige `PANEL_LOGIN_CODE`.
+- Login con contraseña individual; `PANEL_LOGIN_CODE` solo para cuentas sin contraseña (transición). Nunca hay atajo por localhost.
 - **El arranque falla (fail-fast)** si `DATABASE_URL` no es Postgres o falta `REDIS_URL` — SQLite queda imposible en produccion.
 - `/health` falla si Postgres o Redis no responden.
 - Telegram exige secret token por tenant.

@@ -9,6 +9,7 @@ una API key real — ese paso gasta ~US$0.0002 y puede saltarse con --skip-llm.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 import httpx
@@ -25,7 +26,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://localhost:8002")
     ap.add_argument("--email", default="owner@agencia.com")
-    ap.add_argument("--code", default="demo1234")
+    ap.add_argument("--code", default="demo1234", help="PANEL_LOGIN_CODE (solo cuentas sin contraseña)")
+    ap.add_argument("--password", default=os.getenv("E2E_PANEL_PASSWORD", ""),
+                    help="contraseña individual (o env E2E_PANEL_PASSWORD; no se imprime)")
     ap.add_argument("--tenant", default="brasper")
     ap.add_argument("--skip-llm", action="store_true", help="no gastar LLM real")
     args = ap.parse_args()
@@ -38,7 +41,7 @@ def main() -> int:
     check("base de datos OK", h.get("db", {}).get("ok") is True, str(h.get("db")))
 
     # 2. Login
-    r = c.post("/api/login", json={"email": args.email, "code": args.code})
+    r = c.post("/api/login", json={"email": args.email, "code": args.code, "password": args.password or None})
     check("login", r.status_code == 200, r.text[:120])
     if r.status_code != 200:
         return _report()
